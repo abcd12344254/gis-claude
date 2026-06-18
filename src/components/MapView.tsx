@@ -179,6 +179,7 @@ const MapView: React.FC = () => {
         }
         map.setTerrain({ source: 'terrain-dem', exaggeration: 1.5 });
         map.flyTo({ pitch: 55, duration: 1200 });
+        useGISStore.getState().setTerrain3dEnabled(true);
       } else {
         // 关闭 3D：恢复原底图 + 隐藏 hillshade + 移除 terrain + 归平
         if (source) {
@@ -189,6 +190,7 @@ const MapView: React.FC = () => {
         }
         map.setTerrain(null);
         map.flyTo({ pitch: 0, duration: 800 });
+        useGISStore.getState().setTerrain3dEnabled(false);
       }
     };
 
