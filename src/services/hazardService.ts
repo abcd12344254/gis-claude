@@ -1,7 +1,8 @@
 /**
  * 灾害数据服务
  * - USGS 全球地震数据（免费）
- * - SRTM 高程数据（通过 MapLibre terrain）
+ * - SRTM 高程/等高线（通过 MapLibre terrain DEM）
+ * - Open-Meteo 气象数据（免费，无需 Key）
  */
 
 import maplibregl from 'maplibre-gl';
@@ -283,4 +284,94 @@ export function elevationColor(elevation: number): string {
   if (elevation < 2000) return '#c0392b';
   if (elevation < 3000) return '#8e44ad';
   return '#ecf0f1';
+}
+
+// ====== 气象数据（Open-Meteo 免费 API） ======
+
+const WEATHER_API = 'https://api.open-meteo.com/v1/forecast';
+
+export interface WeatherResult {
+  description: string;
+  current?: {
+    temperature: number;
+    windspeed: number;
+    winddirection: number;
+    weathercode: number;
+    humidity: number;
+    precipitation: number;
+  };
+  forecast?: {
+    date: string;
+    tempMax: number;
+    tempMin: number;
+    weathercode: number;
+    precipitation: number;
+  }[];
+}
+
+const WEATHER_CODES: Record<number, string> = {
+  0: '☀️ 晴', 1: '🌤 大部晴', 2: '⛅ 多云', 3: '☁️ 阴',
+  45: '🌫 雾', 48: '🌫 霜雾', 51: '🌧 小雨', 53: '🌧 中雨', 55: '🌧 大雨',
+  61: '🌧 阵雨', 63: '🌧 中阵雨', 65: '🌧 大阵雨',
+  71: '❄️ 小雪', 73: '❄️ 中雪', 75: '❄️ 大雪',
+  80: '🌦 雷阵雨', 95: '⛈ 雷暴', 96: '⛈ 冰雹雷暴', 99: '⛈ 强冰雹',
+};
+
+function weatherDesc(code: number): string {
+  return WEATHER_CODES[code] || `未知(${code})`;
+}
+
+/**
+ * 查询实时气象（当前 + 7天预报）
+ */
+export async function queryWeather(lat: number, lng: number): Promise<WeatherResult> {
+  try {
+    const url = `${WEATHER_API}?latitude=${lat}&longitude=${lng}`
+      + '&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m,wind_direction_10m,precipitation'
+      + '&daily=temperature_2m_max,temperature_2m_min,weather_code,precipitation_sum'
+      + '&timezone=auto&forecast_days=7';
+
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+
+    const current = {
+      temperature: data.current.temperature_2m,
+      windspeed: data.current.wind_speed_10m,
+      winddirection: data.current.wind_direction_10m,
+      weathercode: data.current.weather_code,
+      humidity: data.current.relative_humidity_2m,
+      precipitation: data.current.precipitation,
+    };
+
+    const forecast = data.daily.time.map((date: string, i: number) => ({
+      date,
+      tempMax: data.daily.temperature_2m_max[i],
+      tempMin: data.daily.temperature_2m_min[i],
+      weathercode: data.daily.weather_code[i],
+      precipitation: data.daily.precipitation_sum[i],
+    }));
+
+    const descParts = [
+      `🌡 ${current.temperature}°C`,
+      `💧 ${current.humidity}%`,
+      `🌬 ${current.windspeed}km/h ${windDir(current.winddirection)}`,
+      `📋 ${weatherDesc(current.weathercode)}`,
+    ];
+
+    return {
+      description: `📍 当前气象: ${descParts.join(' | ')}`,
+      current,
+      forecast,
+    };
+  } catch (err) {
+    return {
+      description: `❌ 气象查询失败: ${err instanceof Error ? err.message : '未知错误'}`,
+    };
+  }
+}
+
+function windDir(deg: number): string {
+  const dirs = ['北', '东北', '东', '东南', '南', '西南', '西', '西北'];
+  return dirs[Math.round(deg / 45) % 8];
 }

@@ -59,7 +59,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { planRoute, getRouteBounds } from '../services/routingService';
 import type { RouteResult, TravelMode } from '../services/routingService';
-import { queryEarthquakes, sampleElevationGrid, generateContours, elevationColor } from '../services/hazardService';
+import { queryEarthquakes, sampleElevationGrid, generateContours, elevationColor, queryWeather } from '../services/hazardService';
 import { flattenCoords, getFCBounds } from '../utils/geo';
 
 const { Text } = Typography;
@@ -228,10 +228,11 @@ const GEOJSON_INSTRUCTION = `
 [HAZARD:earthquake]       — 查询当前视野 M≥3.0 地震
 [HAZARD:elevation:100]    — 生成等高线（等高距 100m，需先开3D地形）
 [HAZARD:elevation]        — 生成等高线（默认等高距 100m）
+[HAZARD:weather]          — 查询当前视野实时气象+7天预报
 \`\`\`
 当用户提到"地震"、"地震带"、"最近地震"、"地质灾害"时，生成 earthquake 指令。
 当用户提到"等高线"、"地形"、"海拔"、"高程"时，生成 elevation 指令。先开3D地形。
-地震数据来自 USGS 全球免费。
+当用户提到"天气"、"气温"、"下雨"、"刮风"、"降雨"时，生成 weather 指令。
 
 ### ⚠️ 绝对规则 —— 违反将导致查询失败！
 
@@ -894,7 +895,7 @@ function parseRouteCommands(text: string): RouteCommand[] {
 // ====== HAZARD 灾害数据指令 ======
 
 interface HazardCommand {
-  type: 'earthquake' | 'elevation';
+  type: 'earthquake' | 'elevation' | 'weather';
   param?: string;
 }
 
@@ -972,10 +973,31 @@ async function executeHazardCommand(cmd: HazardCommand): Promise<{
         geojson: fc,
       };
     }
+    case 'weather': {
+      const center = store.mapState.center;
+      const lat = center[1];
+      const lng = center[0];
+      const result = await queryWeather(lat, lng);
+      let desc = result.description;
+      if (result.forecast) {
+        desc += '\n📅 **7天预报**:';
+        for (const d of result.forecast) {
+          desc += `\n  ${d.date}: ${weatherDescLight(d.weathercode)} ${d.tempMin}~${d.tempMax}°C 💧${d.precipitation}mm`;
+        }
+      }
+      return { description: desc, geojson: null };
+    }
     default:
       return { description: `⚠️ 未知灾害查询类型: ${cmd.type}`, geojson: null };
   }
 }
+
+const WEATHER_DESC: Record<number, string> = {
+  0: '☀️', 1: '🌤', 2: '⛅', 3: '☁️', 45: '🌫', 48: '🌫',
+  51: '🌧', 53: '🌧', 55: '🌧', 61: '🌧', 63: '🌧', 65: '🌧',
+  71: '❄️', 73: '❄️', 75: '❄️', 80: '🌦', 95: '⛈', 96: '⛈', 99: '⛈',
+};
+function weatherDescLight(code: number): string { return WEATHER_DESC[code] || '❓'; }
 
 /** 执行路径规划并加载到地图 */
 async function executeRouteCommand(
