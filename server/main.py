@@ -41,7 +41,7 @@ from projects import (
     load_layers,
 )
 
-load_dotenv()
+load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
 app = FastAPI(title="GIS Claude API", version="1.0.0")
 
