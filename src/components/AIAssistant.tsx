@@ -941,9 +941,13 @@ async function executeHazardCommand(cmd: HazardCommand): Promise<{
     case 'elevation': {
       // 检查 3D 地形是否开启
       if (!store.terrain3dEnabled) {
-        // 自动开启3D
         window.dispatchEvent(new CustomEvent('toggle-3d-terrain', { detail: { enabled: true } }));
-        return { description: '🔧 正在开启3D地形，请稍后再试生成等高线', geojson: null };
+        // 等 3 秒 terrain 加载后自动重试
+        await new Promise(r => setTimeout(r, 3000));
+        // 重试前检查是否已开启
+        if (!useGISStore.getState().terrain3dEnabled) {
+          return { description: '⚠️ 3D地形开启失败，请手动点击顶部工具栏的3D按钮', geojson: null };
+        }
       }
       // 通过事件请求 MapView 采样高程
       return new Promise((resolve) => {
