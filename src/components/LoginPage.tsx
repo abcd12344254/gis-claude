@@ -206,7 +206,7 @@ const LoginPage: React.FC = () => {
                 <Form.Item name="email" rules={[{ required: true, message: '请输入邮箱' }, { type: 'email', message: '邮箱格式不正确' }]}>
                   <Input prefix={<MailOutlined style={{ color: '#bfbfbf' }} />} placeholder="邮箱地址" style={{ borderRadius: 8, height: 46 }} />
                 </Form.Item>
-                <Form.Item name="password" rules={[{ required: true, message: '请输入密码' }, { min: 6, message: '密码至少 6 位' }]}>
+                <Form.Item name="password" rules={[{ required: true, message: '请输入密码' }, { min: 6, message: '密码 6-72 位' }, { max: 72, message: '密码最长 72 位' }]}>
                   <Input.Password prefix={<LockOutlined style={{ color: '#bfbfbf' }} />} placeholder="密码" style={{ borderRadius: 8, height: 46 }} />
                 </Form.Item>
                 <Form.Item style={{ marginBottom: 12 }}>
@@ -233,8 +233,8 @@ const LoginPage: React.FC = () => {
                 <Form.Item name="email" rules={[{ required: true, message: '请输入邮箱' }, { type: 'email', message: '邮箱格式不正确' }]}>
                   <Input prefix={<MailOutlined style={{ color: '#bfbfbf' }} />} placeholder="邮箱地址" style={{ borderRadius: 8, height: 46 }} />
                 </Form.Item>
-                <Form.Item name="password" rules={[{ required: true, message: '请输入密码' }, { min: 6, message: '密码至少 6 位' }]}>
-                  <Input.Password prefix={<LockOutlined style={{ color: '#bfbfbf' }} />} placeholder="密码（6 位以上）" style={{ borderRadius: 8, height: 46 }} />
+                <Form.Item name="password" rules={[{ required: true, message: '请输入密码' }, { min: 6, message: '密码 6-72 位' }, { max: 72, message: '密码最长 72 位' }]}>
+                  <Input.Password prefix={<LockOutlined style={{ color: '#bfbfbf' }} />} placeholder="密码（6-72 位）" style={{ borderRadius: 8, height: 46 }} />
                 </Form.Item>
                 <Form.Item style={{ marginBottom: 12 }}>
                   <Button type="primary" htmlType="submit" block style={{ height: 46, borderRadius: 8, fontSize: 16, fontWeight: 600, background: 'linear-gradient(135deg, #1677ff, #0958d9)', border: 'none', boxShadow: '0 4px 14px rgba(22,119,255,0.35)' }}>下一步 · 验证邮箱</Button>

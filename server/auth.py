@@ -79,7 +79,7 @@ def create_user(email: str, password: str) -> dict:
     if existing:
         conn.close()
         raise HTTPException(status_code=409, detail="该邮箱已注册")
-    hashed = pwd_context.hash(password)
+    hashed = pwd_context.hash(password[:72])
     conn.execute(
         "INSERT INTO users (email, password_hash) VALUES (?, ?)", (email, hashed)
     )
@@ -96,7 +96,7 @@ def authenticate_user(email: str, password: str) -> dict | None:
     if not user:
         return None
     user_dict = dict(user)
-    if not pwd_context.verify(password, user_dict["password_hash"]):
+    if not pwd_context.verify(password[:72], user_dict["password_hash"]):
         return None
     return user_dict
 
