@@ -16,6 +16,7 @@ ACCESS_TOKEN_EXPIRE_HOURS = 24 * 7  # 7 天
 DB_PATH = os.path.join(os.path.dirname(__file__), "users.db")
 
 # === 密码哈希 ===
+# bcrypt 72字节限制 → create_user / authenticate_user 中已处理
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # === Models ===
