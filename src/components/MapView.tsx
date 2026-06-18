@@ -233,6 +233,23 @@ const MapView: React.FC = () => {
         b.getWest(), b.getSouth(), b.getEast(), b.getNorth(),
       ];
       const grid = sampleElevationGrid(map, bbox, resolution || 25);
+      if (grid === null) {
+        // terrain 未就绪，等待 sourcedata 后重试
+        const retry = () => {
+          const g = sampleElevationGrid(map, bbox, resolution || 25);
+          if (g !== null) {
+            window.dispatchEvent(new CustomEvent('elevation-grid-result', { detail: g }));
+            map.off('sourcedata', retry);
+          }
+        };
+        map.on('sourcedata', retry);
+        // 超时兜底
+        setTimeout(() => {
+          map.off('sourcedata', retry);
+          window.dispatchEvent(new CustomEvent('elevation-grid-result', { detail: [] }));
+        }, 8000);
+        return;
+      }
       window.dispatchEvent(new CustomEvent('elevation-grid-result', { detail: grid }));
     };
     window.addEventListener('query-elevation-grid', handleQueryElevationGrid);

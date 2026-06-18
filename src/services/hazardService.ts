@@ -96,7 +96,6 @@ export async function queryEarthquakes(params: EarthquakeQuery): Promise<Earthqu
 
 /**
  * 从 MapLibre terrain 获取高程（米）
- * 需要地图已开启 terrain
  */
 export function queryElevationAtPoint(
   map: maplibregl.Map | null,
@@ -105,6 +104,7 @@ export function queryElevationAtPoint(
 ): number | null {
   if (!map) return null;
   try {
+    // queryTerrainElevation 需要 terrain 已加载
     const elev = map.queryTerrainElevation?.([lng, lat]);
     return elev != null ? Math.round(elev) : null;
   } catch {
@@ -114,13 +114,19 @@ export function queryElevationAtPoint(
 
 /**
  * 采样矩形区域内的高程网格
+ * 返回 null 表示 terrain 未就绪
  */
 export function sampleElevationGrid(
   map: maplibregl.Map | null,
   bbox: [number, number, number, number],
   resolution: number = 20
-): { lng: number; lat: number; elevation: number | null }[] {
-  if (!map) return [];
+): { lng: number; lat: number; elevation: number | null }[] | null {
+  if (!map) return null;
+  // 检查 terrain source 是否有数据
+  const source = map.getSource('terrain-dem') as any;
+  if (!source || !map.isSourceLoaded?.('terrain-dem')) {
+    return null; // terrain 未就绪
+  }
   const [w, s, e, n] = bbox;
   const points: { lng: number; lat: number; elevation: number | null }[] = [];
   const lngStep = (e - w) / resolution;

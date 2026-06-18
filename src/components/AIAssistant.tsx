@@ -953,7 +953,7 @@ async function executeHazardCommand(cmd: HazardCommand): Promise<{
       return new Promise((resolve) => {
         const handler = (e: Event) => {
           window.removeEventListener('elevation-grid-result', handler);
-          const grid = (e as CustomEvent).detail as { lng: number; lat: number; elevation: number | null }[];
+          const grid = (e as CustomEvent).detail as { lng: number; lat: number; elevation: number | null }[] | null;
           if (!grid || grid.length === 0) {
             resolve({ description: '⚠️ 高程采样失败，请确认3D地形已加载完成', geojson: null });
             return;
