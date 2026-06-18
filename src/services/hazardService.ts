@@ -4,6 +4,7 @@
  * - SRTM 高程数据（通过 MapLibre terrain）
  */
 
+import maplibregl from 'maplibre-gl';
 import type { FeatureCollection, Feature, Point } from 'geojson';
 
 const USGS_API = 'https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson';
