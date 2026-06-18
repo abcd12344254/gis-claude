@@ -374,10 +374,17 @@ const MapView: React.FC = () => {
             });
           }
           if (layer.type === 'point' || layer.type === 'geojson') {
+            const isHazard = firstFeature?.properties?._hazardType;
             map.addLayer({
               id: circleLayerId, type: 'circle', source: sourceId,
               filter: ['any', ['==', ['geometry-type'], 'Point'], ['==', ['geometry-type'], 'MultiPoint']],
-              paint: { 'circle-color': color, 'circle-radius': 6, 'circle-opacity': opacity, 'circle-stroke-width': 2, 'circle-stroke-color': '#fff' },
+              paint: {
+                'circle-color': isHazard ? (['get', '_magColor'] as any) : color,
+                'circle-radius': isHazard ? (['get', '_radius'] as any) : 6,
+                'circle-opacity': opacity,
+                'circle-stroke-width': isHazard ? 0 : 2,
+                'circle-stroke-color': isHazard ? 'transparent' : '#fff',
+              },
             });
           }
           map.on('click', fillLayerId, (e) => {

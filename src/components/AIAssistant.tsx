@@ -59,6 +59,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { planRoute, getRouteBounds } from '../services/routingService';
 import type { RouteResult, TravelMode } from '../services/routingService';
+import { queryEarthquakes } from '../services/hazardService';
 import { flattenCoords, getFCBounds } from '../utils/geo';
 
 const { Text } = Typography;
@@ -220,6 +221,14 @@ const GEOJSON_INSTRUCTION = `
 \`\`\`
 当用户提到"时空分析"、"时空立方体"、"热点分析"、"空间分布随时间变化"等时，
 告知用户：可以在左侧面板"时空立方体"中上传 CSV 数据，或使用模拟数据按钮。
+
+### 灾害数据指令（地震、地形）
+\`\`\`
+[HAZARD:earthquake:4.0]   — 查询当前视野 M≥4.0 地震（近90天）
+[HAZARD:earthquake]       — 查询当前视野 M≥3.0 地震
+\`\`\`
+当用户提到"地震"、"地震带"、"最近地震"、"地质灾害"时，生成对应指令。
+地震数据来自 USGS 全球免费。
 
 ### ⚠️ 绝对规则 —— 违反将导致查询失败！
 
@@ -879,6 +888,57 @@ function parseRouteCommands(text: string): RouteCommand[] {
   return cmds;
 }
 
+// ====== HAZARD 灾害数据指令 ======
+
+interface HazardCommand {
+  type: 'earthquake' | 'elevation';
+  param?: string;
+}
+
+function parseHazardCommands(text: string): HazardCommand[] {
+  const cmds: HazardCommand[] = [];
+  const regex = /\[HAZARD:(\w+)(?::([^\]]*))?\]/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) {
+    const type = match[1] as HazardCommand['type'];
+    cmds.push({ type, param: match[2] || undefined });
+  }
+  return cmds;
+}
+
+async function executeHazardCommand(cmd: HazardCommand): Promise<{
+  description: string;
+  geojson: FeatureCollection | null;
+}> {
+  const store = useGISStore.getState();
+  const bounds = store.mapState.bounds;
+  if (!bounds) return { description: '⚠️ 地图尚未加载', geojson: null };
+
+  switch (cmd.type) {
+    case 'earthquake': {
+      const minMag = cmd.param ? parseFloat(cmd.param) : 3.0;
+      const result = await queryEarthquakes({
+        bbox: [bounds[0], bounds[1], bounds[2], bounds[3]],
+        minMagnitude: isNaN(minMag) ? 3.0 : minMag,
+        days: 90,
+      });
+      if (result.geojson) {
+        const { addLayer } = store;
+        addLayer({
+          id: '', name: `地震数据_M≥${isNaN(minMag) ? 3.0 : minMag}`,
+          type: 'geojson', visible: true,
+          color: '#ff6d00', opacity: 0.8,
+          data: result.geojson,
+          sourceId: '', layerId: '', createdAt: Date.now(),
+        });
+      }
+      return { description: result.description, geojson: result.geojson };
+    }
+    default:
+      return { description: `⚠️ 未知灾害查询类型: ${cmd.type}`, geojson: null };
+  }
+}
+
 /** 执行路径规划并加载到地图 */
 async function executeRouteCommand(
   cmd: RouteCommand
@@ -1337,6 +1397,27 @@ ${text}`;
                 window.dispatchEvent(new CustomEvent('zoom-to-bounds', { detail: resultBbox }));
               }, 500);
             }
+          }
+        }
+      }
+
+      // 5️⃣ 解析并执行 HAZARD 灾害数据指令
+      const hazardCommands = parseHazardCommands(fullReply);
+      if (hazardCommands.length > 0) {
+        for (let i = 0; i < hazardCommands.length; i++) {
+          const hCmd = hazardCommands[i];
+          const result = await executeHazardCommand(hCmd);
+          addChatMessage({
+            id: `hazard-${Date.now()}-${i}`,
+            role: 'assistant',
+            content: `🌍 **灾害数据**: ${result.description}`,
+            timestamp: Date.now(),
+          });
+          if (result.geojson) {
+            setTimeout(() => {
+              const bbox = getFCBounds(result.geojson);
+              if (bbox) window.dispatchEvent(new CustomEvent('zoom-to-bounds', { detail: bbox }));
+            }, 400);
           }
         }
       }
