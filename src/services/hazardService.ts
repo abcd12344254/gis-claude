@@ -215,6 +215,7 @@ export function generateContours(
   const minElev = Math.floor(Math.min(...allElevs) / interval) * interval;
   const maxElev = Math.ceil(Math.max(...allElevs) / interval) * interval;
   const cellW = (e - w) / resolution;
+  const cellH = (n - s) / resolution;
   const N = resolution + 1;
 
   const getElev = (col: number, row: number): number | null => {
