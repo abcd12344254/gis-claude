@@ -959,43 +959,32 @@ async function executeHazardCommand(cmd: HazardCommand): Promise<{
             return;
           }
           const bbox: [number, number, number, number] = [bounds[0], bounds[1], bounds[2], bounds[3]];
-          // 1. 先生成高程热力图（可靠的彩色网格）
-          const heatmap = generateElevationHeatmap(grid, bbox, 40);
-          const { addLayer } = store;
-          if (heatmap && heatmap.features.length > 0) {
-            addLayer({
-              id: '', name: `高程热力图`,
-              type: 'geojson', visible: true,
-              color: '#27ae60', opacity: 0.4,
-              data: heatmap,
-              sourceId: '', layerId: '', createdAt: Date.now(),
-            });
-          }
-          // 2. 再尝试生成等高线
           const interval = cmd.param ? parseInt(cmd.param) : 200;
           const contours = generateContours(grid, bbox, 40, isNaN(interval) ? 200 : interval);
-          let desc = heatmap
-            ? `🏔️ 高程热力图已生成 (${heatmap.features.length} 个色块)`
-            : '⚠️ 高程数据采样不足';
-          if (contours.length > 0) {
-            const fc: FeatureCollection = {
-              type: 'FeatureCollection',
-              features: contours.map(c => ({
-                type: 'Feature',
-                geometry: { type: 'LineString', coordinates: c.coords },
-                properties: { elevation: c.elevation },
-              })),
-            };
-            addLayer({
-              id: '', name: `等高线_${isNaN(interval) ? 200 : interval}m`,
-              type: 'line', visible: true,
-              color: '#1a1a2e', opacity: 0.6,
-              data: fc,
-              sourceId: '', layerId: '', createdAt: Date.now(),
-            });
-            desc += ` | ${contours.length} 条等高线 (${isNaN(interval) ? 200 : interval}m距)`;
+          const { addLayer } = store;
+          if (contours.length === 0) {
+            resolve({ description: '⚠️ 未生成等高线，可能地形平坦或DEM未加载', geojson: null });
+            return;
           }
-          resolve({ description: desc, geojson: heatmap });
+          const fc: FeatureCollection = {
+            type: 'FeatureCollection',
+            features: contours.map(c => ({
+              type: 'Feature',
+              geometry: { type: 'LineString', coordinates: c.coords },
+              properties: { elevation: c.elevation },
+            })),
+          };
+          addLayer({
+            id: '', name: `等高线_${isNaN(interval) ? 200 : interval}m`,
+            type: 'line', visible: true,
+            color: '#ff4d4f', opacity: 0.7,
+            data: fc,
+            sourceId: '', layerId: '', createdAt: Date.now(),
+          });
+          resolve({
+            description: `🏔️ 等高线已生成 (${contours.length} 条, 等高距 ${isNaN(interval) ? 200 : interval}m)`,
+            geojson: fc,
+          });
         };
         window.addEventListener('elevation-grid-result', handler);
         window.dispatchEvent(new CustomEvent('query-elevation-grid', { detail: { resolution: 40 } }));
@@ -1506,7 +1495,8 @@ ${text}`;
             content: `🌍 **灾害数据**: ${result.description}`,
             timestamp: Date.now(),
           });
-          if (result.geojson) {
+          // 地震数据自动缩放，等高线不缩放（覆盖当前视野）
+          if (hCmd.type === 'earthquake' && result.geojson) {
             const geo = result.geojson;
             setTimeout(() => {
               const bbox = getFCBounds(geo);
