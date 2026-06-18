@@ -136,20 +136,76 @@ export function sampleElevationGrid(
   return points;
 }
 
+/**
+ * 生成高程色块图（比等高线更可靠）
+ * 返回每个格网单元的颜色填充多边形
+ */
+export function generateElevationHeatmap(
+  grid: { lng: number; lat: number; elevation: number | null }[],
+  bbox: [number, number, number, number],
+  resolution: number = 40
+): FeatureCollection | null {
+  const [w, s, e, n] = bbox;
+  const cellW = (e - w) / resolution;
+  const cellH = (n - s) / resolution;
+  const N = resolution + 1;
+  const features: Feature[] = [];
+
+  for (let i = 0; i < resolution; i++) {
+    for (let j = 0; j < resolution; j++) {
+      const idx = (col: number, row: number) => row * N + col;
+      const v00 = grid[idx(i, j)]?.elevation;
+      const v10 = grid[idx(i + 1, j)]?.elevation;
+      const v11 = grid[idx(i + 1, j + 1)]?.elevation;
+      const v01 = grid[idx(i, j + 1)]?.elevation;
+
+      const vals = [v00, v10, v11, v01].filter(v => v != null) as number[];
+      if (vals.length < 2) continue;
+
+      const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+      const cx = w + i * cellW;
+      const cy = s + j * cellH;
+
+      features.push({
+        type: 'Feature',
+        geometry: {
+          type: 'Polygon',
+          coordinates: [[
+            [cx, cy],
+            [cx + cellW, cy],
+            [cx + cellW, cy + cellH],
+            [cx, cy + cellH],
+            [cx, cy],
+          ]],
+        },
+        properties: {
+          elevation: Math.round(avg),
+          _classifyColor: elevationColor(avg),
+          _elevationLabel: `${Math.round(avg)}m`,
+        },
+      });
+    }
+  }
+
+  return features.length > 0
+    ? { type: 'FeatureCollection', features }
+    : null;
+}
+
 interface ContourLine {
   elevation: number;
   coords: [number, number][];
 }
 
 /**
- * 等高线生成：采样网格后用 marching squares 提取等值线
- * @param interval 等高距（米）
+ * 简化版等高线：从格网采样点直接追踪
+ * 只保留高程色块作为主输出，等高线作辅助
  */
 export function generateContours(
   grid: { lng: number; lat: number; elevation: number | null }[],
   bbox: [number, number, number, number],
   resolution: number = 40,
-  interval: number = 100
+  interval: number = 200
 ): ContourLine[] {
   const [w, s, e, n] = bbox;
   const validPoints = grid.filter(p => p.elevation != null);
@@ -158,23 +214,16 @@ export function generateContours(
   const allElevs = validPoints.map(p => p.elevation!);
   const minElev = Math.floor(Math.min(...allElevs) / interval) * interval;
   const maxElev = Math.ceil(Math.max(...allElevs) / interval) * interval;
-  const contours: ContourLine[] = [];
   const cellW = (e - w) / resolution;
-  const cellH = (n - s) / resolution;
   const N = resolution + 1;
 
-  // 辅助：从 grid (1D) 获取 (col, row) 位置的高程
-  // grid 按 (j*N + i) 存储，即 col=i, row=j → grid[j*N + i]
   const getElev = (col: number, row: number): number | null => {
     if (col < 0 || col >= N || row < 0 || row >= N) return null;
     return grid[row * N + col]?.elevation ?? null;
   };
 
-  // 确认 grid 存储顺序与 sampleElevationGrid 一致 (col major: i→col, j→row)
-  // sampleElevationGrid: for i=0..resolution (col) for j=0..resolution (row) push({lng,lat,elev})
-  // 存储顺序: (0,0),(0,1),...,(0,N),(1,0),... → index = row*N + col ✓
+  const contours: ContourLine[] = [];
 
-  // 对每个高程等值面
   for (let elev = minElev; elev <= maxElev; elev += interval) {
     const segments: [number, number][][] = [];
 
@@ -187,12 +236,13 @@ export function generateContours(
         if (v00 == null || v10 == null || v11 == null || v01 == null) continue;
 
         const a = [v00 >= elev, v10 >= elev, v11 >= elev, v01 >= elev];
-        const code = (a[0] ? 1 : 0) | (a[1] ? 2 : 0) | (a[2] ? 4 : 0) | (a[3] ? 8 : 0);
+        const code = (a[0]?1:0) | (a[1]?2:0) | (a[2]?4:0) | (a[3]?8:0);
         if (code === 0 || code === 15) continue;
 
         const lerp = (va: number, vb: number): number => {
-          if (Math.abs(vb - va) < 1) return 0.5;
-          return Math.max(0, Math.min(1, (elev - va) / (vb - va)));
+          const d = vb - va;
+          if (Math.abs(d) < 0.5) return 0.5;
+          return Math.max(0, Math.min(1, (elev - va) / d));
         };
 
         const cx = w + i * cellW;
@@ -200,19 +250,15 @@ export function generateContours(
         const rx = cx + cellW;
         const by = cy + cellH;
 
-        // 四边交点 (top, right, bottom, left)
         const pt: Record<string, [number, number]> = {
           top:    [cx + lerp(v00, v10) * cellW, cy],
           right:  [rx, cy + lerp(v10, v11) * cellH],
-          bottom: [rx - lerp(v01, v11) * cellW, by],
-          left:   [cx, by - lerp(v00, v01) * cellH],
+          bottom: [cx + lerp(v01, v11) * cellW, by],
+          left:   [cx, cy + lerp(v00, v01) * cellH],
         };
 
-        // 标准 marching squares 16 cases 线段连接表
-        // a[0]=tl, a[1]=tr, a[2]=br, a[3]=bl; code = Σ bit_i
         const pairs: [string, string][] = [];
         switch (code) {
-          case 0: case 15: break; // 全下/全上，无线段
           case 1: case 14: pairs.push(['left',  'top']);    break;
           case 2: case 13: pairs.push(['top',   'right']);  break;
           case 3: case 12: pairs.push(['left',  'right']);  break;
@@ -222,20 +268,15 @@ export function generateContours(
           case 7: case 8:  pairs.push(['left',  'bottom']); break;
           case 10: pairs.push(['top','right'], ['bottom','left']); break;
         }
-        for (const [k1, k2] of pairs) {
-          segments.push([pt[k1], pt[k2]]);
-        }
+        for (const [k1, k2] of pairs) segments.push([pt[k1], pt[k2]]);
       }
     }
 
-    if (segments.length === 0) continue;
+    if (segments.length < 2) continue;
 
-    // 简单合并：距离 < 两倍 cell 的视为相邻
-    const threshold = Math.max(cellW, cellH) * 3;
-    const dist = (a: [number, number], b: [number, number]) =>
-      Math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2);
-
+    // 合并相邻段
     const used = new Set<number>();
+    const maxDist = Math.max(cellW, cellH) * 4;
     for (let si = 0; si < segments.length; si++) {
       if (used.has(si)) continue;
       const chain = [...segments[si]];
@@ -245,28 +286,17 @@ export function generateContours(
         grown = false;
         for (let sj = 0; sj < segments.length; sj++) {
           if (used.has(sj)) continue;
-          if (dist(chain[chain.length - 1], segments[sj][0]) < threshold) {
-            chain.push(segments[sj][1]);
-            used.add(sj);
-            grown = true;
-          } else if (dist(chain[chain.length - 1], segments[sj][1]) < threshold) {
-            chain.push(segments[sj][0]);
-            used.add(sj);
-            grown = true;
-          } else if (dist(chain[0], segments[sj][1]) < threshold) {
-            chain.unshift(segments[sj][0]);
-            used.add(sj);
-            grown = true;
-          } else if (dist(chain[0], segments[sj][0]) < threshold) {
-            chain.unshift(segments[sj][1]);
-            used.add(sj);
-            grown = true;
-          }
+          const d1 = Math.hypot(chain[chain.length-1][0]-segments[sj][0][0], chain[chain.length-1][1]-segments[sj][0][1]);
+          const d2 = Math.hypot(chain[chain.length-1][0]-segments[sj][1][0], chain[chain.length-1][1]-segments[sj][1][1]);
+          const d3 = Math.hypot(chain[0][0]-segments[sj][1][0], chain[0][1]-segments[sj][1][1]);
+          const d4 = Math.hypot(chain[0][0]-segments[sj][0][0], chain[0][1]-segments[sj][0][1]);
+          if (d1 < maxDist) { chain.push(segments[sj][1]); used.add(sj); grown = true; }
+          else if (d2 < maxDist) { chain.push(segments[sj][0]); used.add(sj); grown = true; }
+          else if (d3 < maxDist) { chain.unshift(segments[sj][0]); used.add(sj); grown = true; }
+          else if (d4 < maxDist) { chain.unshift(segments[sj][1]); used.add(sj); grown = true; }
         }
       }
-      if (chain.length >= 2) {
-        contours.push({ elevation: elev, coords: chain });
-      }
+      if (chain.length >= 3) contours.push({ elevation: elev, coords: chain });
     }
   }
 

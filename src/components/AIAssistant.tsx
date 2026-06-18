@@ -59,7 +59,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { planRoute, getRouteBounds } from '../services/routingService';
 import type { RouteResult, TravelMode } from '../services/routingService';
-import { queryEarthquakes, sampleElevationGrid, generateContours, elevationColor, queryWeather } from '../services/hazardService';
+import { queryEarthquakes, sampleElevationGrid, generateContours, generateElevationHeatmap, queryWeather } from '../services/hazardService';
 import { flattenCoords, getFCBounds } from '../utils/geo';
 
 const { Text } = Typography;
@@ -959,32 +959,43 @@ async function executeHazardCommand(cmd: HazardCommand): Promise<{
             return;
           }
           const bbox: [number, number, number, number] = [bounds[0], bounds[1], bounds[2], bounds[3]];
-          const interval = cmd.param ? parseInt(cmd.param) : 100;
-          const contours = generateContours(grid, bbox, 25, isNaN(interval) ? 100 : interval);
-          if (contours.length === 0) {
-            resolve({ description: '⚠️ 未生成等高线，请确保视野内有地形起伏', geojson: null });
-            return;
-          }
-          const fc: FeatureCollection = {
-            type: 'FeatureCollection',
-            features: contours.map(c => ({
-              type: 'Feature',
-              geometry: { type: 'LineString', coordinates: c.coords },
-              properties: { elevation: c.elevation, _lineColor: elevationColor(c.elevation) },
-            })),
-          };
+          // 1. 先生成高程热力图（可靠的彩色网格）
+          const heatmap = generateElevationHeatmap(grid, bbox, 40);
           const { addLayer } = store;
-          addLayer({
-            id: '', name: `等高线_${isNaN(interval) ? 100 : interval}m`,
-            type: 'line', visible: true,
-            color: '#3388ff', opacity: 0.8,
-            data: fc,
-            sourceId: '', layerId: '', createdAt: Date.now(),
-          });
-          resolve({
-            description: `🏔️ 等高线已生成 (${contours.length} 条, 等高距 ${isNaN(interval) ? 100 : interval}m)`,
-            geojson: fc,
-          });
+          if (heatmap && heatmap.features.length > 0) {
+            addLayer({
+              id: '', name: `高程热力图`,
+              type: 'geojson', visible: true,
+              color: '#27ae60', opacity: 0.4,
+              data: heatmap,
+              sourceId: '', layerId: '', createdAt: Date.now(),
+            });
+          }
+          // 2. 再尝试生成等高线
+          const interval = cmd.param ? parseInt(cmd.param) : 200;
+          const contours = generateContours(grid, bbox, 40, isNaN(interval) ? 200 : interval);
+          let desc = heatmap
+            ? `🏔️ 高程热力图已生成 (${heatmap.features.length} 个色块)`
+            : '⚠️ 高程数据采样不足';
+          if (contours.length > 0) {
+            const fc: FeatureCollection = {
+              type: 'FeatureCollection',
+              features: contours.map(c => ({
+                type: 'Feature',
+                geometry: { type: 'LineString', coordinates: c.coords },
+                properties: { elevation: c.elevation },
+              })),
+            };
+            addLayer({
+              id: '', name: `等高线_${isNaN(interval) ? 200 : interval}m`,
+              type: 'line', visible: true,
+              color: '#1a1a2e', opacity: 0.6,
+              data: fc,
+              sourceId: '', layerId: '', createdAt: Date.now(),
+            });
+            desc += ` | ${contours.length} 条等高线 (${isNaN(interval) ? 200 : interval}m距)`;
+          }
+          resolve({ description: desc, geojson: heatmap });
         };
         window.addEventListener('elevation-grid-result', handler);
         window.dispatchEvent(new CustomEvent('query-elevation-grid', { detail: { resolution: 40 } }));
