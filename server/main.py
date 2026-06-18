@@ -153,11 +153,11 @@ async def auth_register(req: UserRegister):
     try:
         user = create_user(req.email, req.password)
         token = create_access_token(user["id"], user["email"])
-        return {"token": token, "user": {"id": user["id"], "email": user["email"], "plan": user["plan"], "verified": user.get("verified", 0)}}
+        return {"token": token, "user": {"id": user["id"], "email": user["email"], "plan": user["plan"], "verified": user.get("verified", 0)}, "_v": "20260618-fix"}
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"注册失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"[v20260618] 注册失败: {str(e)}")
 
 
 @app.post("/api/auth/login")

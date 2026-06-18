@@ -80,9 +80,13 @@ def create_user(email: str, password: str) -> dict:
     if existing:
         conn.close()
         raise HTTPException(status_code=409, detail="该邮箱已注册")
-    # bcrypt 限制 72 字节，按字节截断（中文等多字节字符安全）
-    pwd_bytes = password.encode("utf-8")[:72]
-    hashed = pwd_context.hash(pwd_bytes.decode("utf-8", errors="ignore"))
+    # bcrypt 72字节限制：优先按UTF-8字节截断
+    try:
+        hashed = pwd_context.hash(password)
+    except ValueError:
+        # 密码超72字节时强制截断
+        pwd_bytes = password.encode("utf-8")[:72]
+        hashed = pwd_context.hash(pwd_bytes.decode("utf-8", errors="ignore"))
     conn.execute(
         "INSERT INTO users (email, password_hash) VALUES (?, ?)", (email, hashed)
     )
