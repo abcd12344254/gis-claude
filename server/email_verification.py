@@ -92,8 +92,13 @@ def send_verification_code(email: str) -> dict:
         msg["To"] = email
         msg.attach(MIMEText(html, "html", "utf-8"))
 
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
-            server.starttls()
+        if SMTP_PORT == 465:
+            server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30)
+        else:
+            server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
+        with server:
+            if SMTP_PORT != 465:
+                server.starttls()
             server.login(SMTP_USER, SMTP_PASSWORD)
             server.sendmail(SMTP_FROM, [email], msg.as_string())
 
