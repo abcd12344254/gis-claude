@@ -58,7 +58,7 @@ const LoginPage: React.FC = () => {
       if (data.success) {
         setCodeSent(true);
         startCountdown();
-        message.success('验证码已发送，请检查邮箱');
+        message.success(data.message || '验证码已发送，请检查邮箱', 8);
       } else {
         message.warning(data.message || '发送失败');
       }
