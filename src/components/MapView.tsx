@@ -5,6 +5,7 @@ import * as turf from '@turf/turf';
 import { useGISStore } from '../store/useGISStore';
 import type { FeatureCollection, LineString, Point } from 'geojson';
 import { measureDistance, measureArea } from '../services/spatialAnalysis';
+import { sampleElevationGrid } from '../services/hazardService';
 
 const TERRAIN_DEM_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
 
@@ -222,6 +223,18 @@ const MapView: React.FC = () => {
     window.addEventListener('add-direct-layer', handleAddDirectLayer);
     window.addEventListener('toggle-3d-terrain', handleToggle3DTerrain);
 
+    // 响应 AI 助手的等高线生成请求
+    const handleQueryElevationGrid = (e: Event) => {
+      const { resolution } = (e as CustomEvent).detail || { resolution: 25 };
+      const b = map.getBounds();
+      const bbox: [number, number, number, number] = [
+        b.getWest(), b.getSouth(), b.getEast(), b.getNorth(),
+      ];
+      const grid = sampleElevationGrid(map, bbox, resolution || 25);
+      window.dispatchEvent(new CustomEvent('elevation-grid-result', { detail: grid }));
+    };
+    window.addEventListener('query-elevation-grid', handleQueryElevationGrid);
+
     return () => {
       window.removeEventListener('fly-to', handleFlyTo);
       window.removeEventListener('map-zoom-in', handleZoomIn);
@@ -230,6 +243,7 @@ const MapView: React.FC = () => {
       window.removeEventListener('change-basemap', handleChangeBasemap);
       window.removeEventListener('add-direct-layer', handleAddDirectLayer);
       window.removeEventListener('toggle-3d-terrain', handleToggle3DTerrain);
+      window.removeEventListener('query-elevation-grid', handleQueryElevationGrid);
     };
   }, []);
 

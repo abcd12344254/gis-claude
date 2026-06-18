@@ -939,39 +939,57 @@ async function executeHazardCommand(cmd: HazardCommand): Promise<{
       return { description: result.description, geojson: result.geojson };
     }
     case 'elevation': {
-      // 需要 terrain 已启用；先尝试获取 map 引用
-      const mapEl = document.querySelector('.maplibregl-map') as any;
-      const map = mapEl?._map || mapEl?.map || null;
-      if (!map || typeof map.queryTerrainElevation !== 'function') {
-        return { description: '⚠️ 等高线需要先开启 3D 地形（点顶部工具栏的 3D 按钮）', geojson: null };
+      // 检查 3D 地形是否开启
+      if (!store.terrain3dEnabled) {
+        // 自动开启3D
+        window.dispatchEvent(new CustomEvent('toggle-3d-terrain', { detail: { enabled: true } }));
+        return { description: '🔧 正在开启3D地形，请稍后再试生成等高线', geojson: null };
       }
-      const bbox: [number, number, number, number] = [bounds[0], bounds[1], bounds[2], bounds[3]];
-      const interval = cmd.param ? parseInt(cmd.param) : 100;
-      const grid = sampleElevationGrid(map as any, bbox, 25);
-      const contours = generateContours(grid, bbox, 25, isNaN(interval) ? 100 : interval);
-      if (contours.length === 0) {
-        return { description: '⚠️ 未生成等高线，请确认已开启3D地形且视野内有地形起伏', geojson: null };
-      }
-      const fc: FeatureCollection = {
-        type: 'FeatureCollection',
-        features: contours.map(c => ({
-          type: 'Feature',
-          geometry: { type: 'LineString', coordinates: c.coords },
-          properties: { elevation: c.elevation, _lineColor: elevationColor(c.elevation) },
-        })),
-      };
-      const { addLayer } = store;
-      addLayer({
-        id: '', name: `等高线_${isNaN(interval) ? 100 : interval}m`,
-        type: 'geojson', visible: true,
-        color: '#27ae60', opacity: 0.7,
-        data: fc,
-        sourceId: '', layerId: '', createdAt: Date.now(),
+      // 通过事件请求 MapView 采样高程
+      return new Promise((resolve) => {
+        const handler = (e: Event) => {
+          window.removeEventListener('elevation-grid-result', handler);
+          const grid = (e as CustomEvent).detail as { lng: number; lat: number; elevation: number | null }[];
+          if (!grid || grid.length === 0) {
+            resolve({ description: '⚠️ 高程采样失败，请确认3D地形已加载完成', geojson: null });
+            return;
+          }
+          const bbox: [number, number, number, number] = [bounds[0], bounds[1], bounds[2], bounds[3]];
+          const interval = cmd.param ? parseInt(cmd.param) : 100;
+          const contours = generateContours(grid, bbox, 25, isNaN(interval) ? 100 : interval);
+          if (contours.length === 0) {
+            resolve({ description: '⚠️ 未生成等高线，请确保视野内有地形起伏', geojson: null });
+            return;
+          }
+          const fc: FeatureCollection = {
+            type: 'FeatureCollection',
+            features: contours.map(c => ({
+              type: 'Feature',
+              geometry: { type: 'LineString', coordinates: c.coords },
+              properties: { elevation: c.elevation, _lineColor: elevationColor(c.elevation) },
+            })),
+          };
+          const { addLayer } = store;
+          addLayer({
+            id: '', name: `等高线_${isNaN(interval) ? 100 : interval}m`,
+            type: 'line', visible: true,
+            color: '#3388ff', opacity: 0.8,
+            data: fc,
+            sourceId: '', layerId: '', createdAt: Date.now(),
+          });
+          resolve({
+            description: `🏔️ 等高线已生成 (${contours.length} 条, 等高距 ${isNaN(interval) ? 100 : interval}m)`,
+            geojson: fc,
+          });
+        };
+        window.addEventListener('elevation-grid-result', handler);
+        window.dispatchEvent(new CustomEvent('query-elevation-grid', { detail: { resolution: 25 } }));
+        // 超时兜底
+        setTimeout(() => {
+          window.removeEventListener('elevation-grid-result', handler);
+          resolve({ description: '⚠️ 高程采样超时，请确认3D地形已加载', geojson: null });
+        }, 5000);
       });
-      return {
-        description: `🏔️ 等高线已生成 (${contours.length} 条, 等高距 ${isNaN(interval) ? 100 : interval}m)`,
-        geojson: fc,
-      };
     }
     case 'weather': {
       const center = store.mapState.center;
