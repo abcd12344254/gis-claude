@@ -137,171 +137,56 @@ export function sampleElevationGrid(
 }
 
 /**
- * 生成高程色块图（比等高线更可靠）
- * 返回每个格网单元的颜色填充多边形
+ * 100% 可靠的高程点图：每个采样点一个点，按高程着色
+ * 不连线不拟合，数据说什么就是什么
  */
-export function generateElevationHeatmap(
+export function generateElevationPoints(
   grid: { lng: number; lat: number; elevation: number | null }[],
   bbox: [number, number, number, number],
-  resolution: number = 40
+  sampleEvery: number = 3  // 每 N 个点取一个（避免太密）
 ): FeatureCollection | null {
-  const [w, s, e, n] = bbox;
-  const cellW = (e - w) / resolution;
-  const cellH = (n - s) / resolution;
-  const N = resolution + 1;
+  const valid = grid.filter(p => p.elevation != null);
+  if (valid.length === 0) return null;
+
   const features: Feature[] = [];
-
-  for (let i = 0; i < resolution; i++) {
-    for (let j = 0; j < resolution; j++) {
-      const idx = (col: number, row: number) => row * N + col;
-      const v00 = grid[idx(i, j)]?.elevation;
-      const v10 = grid[idx(i + 1, j)]?.elevation;
-      const v11 = grid[idx(i + 1, j + 1)]?.elevation;
-      const v01 = grid[idx(i, j + 1)]?.elevation;
-
-      const vals = [v00, v10, v11, v01].filter(v => v != null) as number[];
-      if (vals.length < 2) continue;
-
-      const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
-      const cx = w + i * cellW;
-      const cy = s + j * cellH;
-
-      features.push({
-        type: 'Feature',
-        geometry: {
-          type: 'Polygon',
-          coordinates: [[
-            [cx, cy],
-            [cx + cellW, cy],
-            [cx + cellW, cy + cellH],
-            [cx, cy + cellH],
-            [cx, cy],
-          ]],
-        },
-        properties: {
-          elevation: Math.round(avg),
-          _classifyColor: elevationColor(avg),
-          _elevationLabel: `${Math.round(avg)}m`,
-        },
-      });
-    }
+  for (let i = 0; i < valid.length; i += sampleEvery) {
+    const p = valid[i];
+    features.push({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [p.lng, p.lat] },
+      properties: {
+        elevation: Math.round(p.elevation!),
+        _magColor: elevationColor(p.elevation!),
+        _radius: 4,
+        _hazardType: 'elevation',
+      },
+    });
   }
 
-  return features.length > 0
-    ? { type: 'FeatureCollection', features }
-    : null;
-}
-
-interface ContourLine {
-  elevation: number;
-  coords: [number, number][];
+  return { type: 'FeatureCollection', features };
 }
 
 /**
- * 简化版等高线：从格网采样点直接追踪
- * 只保留高程色块作为主输出，等高线作辅助
+ * 生成高程标签：取最高点和最低点
  */
-export function generateContours(
-  grid: { lng: number; lat: number; elevation: number | null }[],
-  bbox: [number, number, number, number],
-  resolution: number = 40,
-  interval: number = 200
-): ContourLine[] {
-  const [w, s, e, n] = bbox;
-  const validPoints = grid.filter(p => p.elevation != null);
-  if (validPoints.length < 4) return [];
+export function generateElevationLabels(
+  grid: { lng: number; lat: number; elevation: number | null }[]
+): FeatureCollection | null {
+  const valid = grid.filter(p => p.elevation != null) as { lng: number; lat: number; elevation: number }[];
+  if (valid.length === 0) return null;
 
-  const allElevs = validPoints.map(p => p.elevation!);
-  const minElev = Math.floor(Math.min(...allElevs) / interval) * interval;
-  const maxElev = Math.ceil(Math.max(...allElevs) / interval) * interval;
-  const cellW = (e - w) / resolution;
-  const cellH = (n - s) / resolution;
-  const N = resolution + 1;
+  const max = valid.reduce((a, b) => a.elevation > b.elevation ? a : b);
+  const min = valid.reduce((a, b) => a.elevation < b.elevation ? a : b);
 
-  const getElev = (col: number, row: number): number | null => {
-    if (col < 0 || col >= N || row < 0 || row >= N) return null;
-    return grid[row * N + col]?.elevation ?? null;
+  return {
+    type: 'FeatureCollection',
+    features: [
+      { type: 'Feature', geometry: { type: 'Point', coordinates: [max.lng, max.lat] },
+        properties: { name: `▲${Math.round(max.elevation)}m`, elevation: Math.round(max.elevation), _elevationLabel: 'peak' } },
+      { type: 'Feature', geometry: { type: 'Point', coordinates: [min.lng, min.lat] },
+        properties: { name: `▼${Math.round(min.elevation)}m`, elevation: Math.round(min.elevation), _elevationLabel: 'valley' } },
+    ],
   };
-
-  const contours: ContourLine[] = [];
-
-  for (let elev = minElev; elev <= maxElev; elev += interval) {
-    const segments: [number, number][][] = [];
-
-    for (let i = 0; i < resolution; i++) {
-      for (let j = 0; j < resolution; j++) {
-        const v00 = getElev(i, j);
-        const v10 = getElev(i + 1, j);
-        const v11 = getElev(i + 1, j + 1);
-        const v01 = getElev(i, j + 1);
-        if (v00 == null || v10 == null || v11 == null || v01 == null) continue;
-
-        const a = [v00 >= elev, v10 >= elev, v11 >= elev, v01 >= elev];
-        const code = (a[0]?1:0) | (a[1]?2:0) | (a[2]?4:0) | (a[3]?8:0);
-        if (code === 0 || code === 15) continue;
-
-        const lerp = (va: number, vb: number): number => {
-          const d = vb - va;
-          if (Math.abs(d) < 0.5) return 0.5;
-          return Math.max(0, Math.min(1, (elev - va) / d));
-        };
-
-        const cx = w + i * cellW;
-        const cy = s + j * cellH;
-        const rx = cx + cellW;
-        const by = cy + cellH;
-
-        const pt: Record<string, [number, number]> = {
-          top:    [cx + lerp(v00, v10) * cellW, cy],
-          right:  [rx, cy + lerp(v10, v11) * cellH],
-          bottom: [cx + lerp(v01, v11) * cellW, by],
-          left:   [cx, cy + lerp(v00, v01) * cellH],
-        };
-
-        const pairs: [string, string][] = [];
-        switch (code) {
-          case 1: case 14: pairs.push(['left',  'top']);    break;
-          case 2: case 13: pairs.push(['top',   'right']);  break;
-          case 3: case 12: pairs.push(['left',  'right']);  break;
-          case 4: case 11: pairs.push(['right', 'bottom']); break;
-          case 5: pairs.push(['top','left'], ['bottom','right']); break;
-          case 6: case 9:  pairs.push(['top',   'bottom']); break;
-          case 7: case 8:  pairs.push(['left',  'bottom']); break;
-          case 10: pairs.push(['top','right'], ['bottom','left']); break;
-        }
-        for (const [k1, k2] of pairs) segments.push([pt[k1], pt[k2]]);
-      }
-    }
-
-    if (segments.length < 2) continue;
-
-    // 合并相邻段
-    const used = new Set<number>();
-    const maxDist = Math.max(cellW, cellH) * 4;
-    for (let si = 0; si < segments.length; si++) {
-      if (used.has(si)) continue;
-      const chain = [...segments[si]];
-      used.add(si);
-      let grown = true;
-      while (grown) {
-        grown = false;
-        for (let sj = 0; sj < segments.length; sj++) {
-          if (used.has(sj)) continue;
-          const d1 = Math.hypot(chain[chain.length-1][0]-segments[sj][0][0], chain[chain.length-1][1]-segments[sj][0][1]);
-          const d2 = Math.hypot(chain[chain.length-1][0]-segments[sj][1][0], chain[chain.length-1][1]-segments[sj][1][1]);
-          const d3 = Math.hypot(chain[0][0]-segments[sj][1][0], chain[0][1]-segments[sj][1][1]);
-          const d4 = Math.hypot(chain[0][0]-segments[sj][0][0], chain[0][1]-segments[sj][0][1]);
-          if (d1 < maxDist) { chain.push(segments[sj][1]); used.add(sj); grown = true; }
-          else if (d2 < maxDist) { chain.push(segments[sj][0]); used.add(sj); grown = true; }
-          else if (d3 < maxDist) { chain.unshift(segments[sj][0]); used.add(sj); grown = true; }
-          else if (d4 < maxDist) { chain.unshift(segments[sj][1]); used.add(sj); grown = true; }
-        }
-      }
-      if (chain.length >= 3) contours.push({ elevation: elev, coords: chain });
-    }
-  }
-
-  return contours;
 }
 
 /** 高程→颜色映射 */

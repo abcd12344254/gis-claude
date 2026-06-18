@@ -59,7 +59,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { planRoute, getRouteBounds } from '../services/routingService';
 import type { RouteResult, TravelMode } from '../services/routingService';
-import { queryEarthquakes, sampleElevationGrid, generateContours, generateElevationHeatmap, queryWeather } from '../services/hazardService';
+import { queryEarthquakes, sampleElevationGrid, generateElevationPoints, generateElevationLabels, queryWeather } from '../services/hazardService';
 import { flattenCoords, getFCBounds } from '../utils/geo';
 
 const { Text } = Typography;
@@ -959,32 +959,40 @@ async function executeHazardCommand(cmd: HazardCommand): Promise<{
             return;
           }
           const bbox: [number, number, number, number] = [bounds[0], bounds[1], bounds[2], bounds[3]];
-          const interval = cmd.param ? parseInt(cmd.param) : 200;
-          const contours = generateContours(grid, bbox, 40, isNaN(interval) ? 200 : interval);
+          const points = generateElevationPoints(grid, bbox, 4);
+          const labels = generateElevationLabels(grid);
           const { addLayer } = store;
-          if (contours.length === 0) {
-            resolve({ description: '⚠️ 未生成等高线，可能地形平坦或DEM未加载', geojson: null });
-            return;
+
+          if (points) {
+            addLayer({
+              id: '', name: `高程采样点`,
+              type: 'geojson', visible: true,
+              color: '#27ae60', opacity: 0.9,
+              data: points,
+              sourceId: '', layerId: '', createdAt: Date.now(),
+            });
           }
-          const fc: FeatureCollection = {
-            type: 'FeatureCollection',
-            features: contours.map(c => ({
-              type: 'Feature',
-              geometry: { type: 'LineString', coordinates: c.coords },
-              properties: { elevation: c.elevation },
-            })),
-          };
-          addLayer({
-            id: '', name: `等高线_${isNaN(interval) ? 200 : interval}m`,
-            type: 'line', visible: true,
-            color: '#ff4d4f', opacity: 0.7,
-            data: fc,
-            sourceId: '', layerId: '', createdAt: Date.now(),
-          });
-          resolve({
-            description: `🏔️ 等高线已生成 (${contours.length} 条, 等高距 ${isNaN(interval) ? 200 : interval}m)`,
-            geojson: fc,
-          });
+          if (labels) {
+            addLayer({
+              id: '', name: `高程极值点`,
+              type: 'point', visible: true,
+              color: '#ff0000', opacity: 1,
+              data: labels,
+              sourceId: '', layerId: '', createdAt: Date.now(),
+            });
+          }
+
+          if (points) {
+            const elevs = grid.filter(p => p.elevation != null).map(p => p.elevation!) as number[];
+            const min = Math.round(Math.min(...elevs));
+            const max = Math.round(Math.max(...elevs));
+            resolve({
+              description: `🏔️ 高程分析完成：${grid.filter(p => p.elevation != null).length} 个采样点，海拔 ${min}m ~ ${max}m`,
+              geojson: points,
+            });
+          } else {
+            resolve({ description: '⚠️ 高程数据不可用，请确认3D地形已加载', geojson: null });
+          }
         };
         window.addEventListener('elevation-grid-result', handler);
         window.dispatchEvent(new CustomEvent('query-elevation-grid', { detail: { resolution: 40 } }));
