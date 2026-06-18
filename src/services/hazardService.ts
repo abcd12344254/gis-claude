@@ -142,131 +142,123 @@ interface ContourLine {
 }
 
 /**
- * 简化版等高线：从高程网格生成等值线（marching squares）
+ * 等高线生成：采样网格后用 marching squares 提取等值线
  * @param interval 等高距（米）
  */
 export function generateContours(
   grid: { lng: number; lat: number; elevation: number | null }[],
   bbox: [number, number, number, number],
-  resolution: number = 20,
+  resolution: number = 40,
   interval: number = 100
 ): ContourLine[] {
   const [w, s, e, n] = bbox;
   const validPoints = grid.filter(p => p.elevation != null);
   if (validPoints.length < 4) return [];
 
-  const minElev = Math.floor(Math.min(...validPoints.map(p => p.elevation!)) / interval) * interval;
-  const maxElev = Math.ceil(Math.max(...validPoints.map(p => p.elevation!)) / interval) * interval;
+  const allElevs = validPoints.map(p => p.elevation!);
+  const minElev = Math.floor(Math.min(...allElevs) / interval) * interval;
+  const maxElev = Math.ceil(Math.max(...allElevs) / interval) * interval;
   const contours: ContourLine[] = [];
   const cellW = (e - w) / resolution;
   const cellH = (n - s) / resolution;
+  const N = resolution + 1;
 
-  // 对每个等值面生成轮廓线
+  // 辅助：从 grid (1D) 获取 (col, row) 位置的高程
+  const getElev = (col: number, row: number): number | null => {
+    if (col < 0 || col >= N || row < 0 || row >= N) return null;
+    return grid[row * N + col]?.elevation ?? null;
+  };
+
+  // 对每个高程等值面
   for (let elev = minElev; elev <= maxElev; elev += interval) {
-    const lines: [number, number][][] = [];
-    const visited = new Set<string>();
+    const segments: [number, number][][] = [];
 
-    // 遍历每个网格单元
     for (let i = 0; i < resolution; i++) {
       for (let j = 0; j < resolution; j++) {
-        const idx = (row: number, col: number) => row * (resolution + 1) + col;
-        const v = [
-          grid[idx(j, i)]?.elevation,     // 左上
-          grid[idx(j, i + 1)]?.elevation, // 右上
-          grid[idx(j + 1, i + 1)]?.elevation, // 右下
-          grid[idx(j + 1, i)]?.elevation, // 左下
-        ];
+        const v00 = getElev(i, j);
+        const v10 = getElev(i + 1, j);
+        const v11 = getElev(i + 1, j + 1);
+        const v01 = getElev(i, j + 1);
+        if (v00 == null || v10 == null || v11 == null || v01 == null) continue;
 
-        if (v.some(x => x == null)) continue;
-
-        // marching squares 简化版：4个角点与等值面比较
-        const cellX = w + i * cellW;
-        const cellY = s + j * cellH;
-        const above = v.map(x => x! >= elev);
-        const code = (above[0] ? 1 : 0) | (above[1] ? 2 : 0) | (above[2] ? 4 : 0) | (above[3] ? 8 : 0);
-
-        // 只有穿过等值面的单元才处理（0 和 15 表示全在内部或全在外部）
+        const a = [v00 >= elev, v10 >= elev, v11 >= elev, v01 >= elev];
+        const code = (a[0] ? 1 : 0) | (a[1] ? 2 : 0) | (a[2] ? 4 : 0) | (a[3] ? 8 : 0);
         if (code === 0 || code === 15) continue;
 
-        // 插值找交点
-        const interpolate = (a: number | null, b: number | null, ratio: number): number => {
-          if (a == null || b == null || Math.abs(b - a) < 1e-6) return ratio;
-          return (elev - a) / (b - a);
+        const lerp = (va: number, vb: number): number => {
+          if (Math.abs(vb - va) < 0.01) return 0.5;
+          return Math.max(0, Math.min(1, (elev - va) / (vb - va)));
         };
 
-        const segments: [number, number][][] = [];
-        const cx = cellX + cellW / 2;
-        const cy = cellY + cellH / 2;
-        const leftX = cellX;
-        const rightX = cellX + cellW;
-        const topY = cellY;
-        const bottomY = cellY + cellH;
+        const cx = w + i * cellW;
+        const cy = s + j * cellH;
+        const rx = cx + cellW;
+        const by = cy + cellH;
 
-        const topT = interpolate(v[0], v[1], 0);
-        const rightT = interpolate(v[1], v[2], 0);
-        const bottomT = interpolate(v[3], v[2], 0);
-        const leftT = interpolate(v[0], v[3], 0);
+        // 四边交点 (top, right, bottom, left)
+        const pt: Record<string, [number, number]> = {
+          top:    [cx + lerp(v00, v10) * cellW, cy],
+          right:  [rx, cy + lerp(v10, v11) * cellH],
+          bottom: [rx - lerp(v01, v11) * cellW, by],
+          left:   [cx, by - lerp(v00, v01) * cellH],
+        };
 
-        const topP: [number, number] = [leftX + topT * cellW, topY];
-        const rightP: [number, number] = [rightX, topY + rightT * cellH];
-        const bottomP: [number, number] = [rightX - bottomT * cellW, bottomY];
-        const leftP: [number, number] = [leftX, bottomY - leftT * cellH];
-
-        // 根据 marching squares 模式连接线段
-        const pts: [number, number][] = [];
-        if (above[0] !== above[1]) pts.push(topP);
-        if (above[1] !== above[2]) pts.push(rightP);
-        if (above[2] !== above[3]) pts.push(bottomP);
-        if (above[3] !== above[0]) pts.push(leftP);
-
-        if (pts.length >= 2) {
-          lines.push([pts[0], pts[1]]);
+        // 经典 marching squares 16 cases
+        const pairs: [string, string][] = [];
+        switch (code) {
+          case 1: case 14: pairs.push(['left', 'bottom']); break;
+          case 2: case 13: pairs.push(['bottom', 'right']); break;
+          case 3: case 12: pairs.push(['left', 'right']); break;
+          case 4: case 11: pairs.push(['top', 'right']); break;
+          case 5: pairs.push(['top', 'left']); pairs.push(['bottom', 'right']); break;
+          case 6: case 9:  pairs.push(['top', 'bottom']); break;
+          case 7: case 8:  pairs.push(['top', 'left']); break;
+          case 10: pairs.push(['top', 'right']); pairs.push(['bottom', 'left']); break;
         }
-        if (pts.length === 4) {
-          lines.push([pts[2], pts[3]]);
+        for (const [k1, k2] of pairs) {
+          segments.push([pt[k1], pt[k2]]);
         }
       }
     }
 
-    if (lines.length > 0) {
-      // 合并相邻线段
-      const merged: [number, number][] = [];
-      const remaining = [...lines];
-      if (remaining.length > 0) {
-        merged.push(...remaining.shift()!);
-        let changed = true;
-        while (changed && remaining.length > 0) {
-          changed = false;
-          for (let k = remaining.length - 1; k >= 0; k--) {
-            const seg = remaining[k];
-            const last = merged[merged.length - 1];
-            const first = merged[0];
-            const dist = (a: [number, number], b: [number, number]) =>
-              Math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2);
+    if (segments.length === 0) continue;
 
-            if (dist(last, seg[0]) < cellW * 0.1) {
-              merged.push(seg[1]);
-              remaining.splice(k, 1);
-              changed = true;
-            } else if (dist(last, seg[1]) < cellW * 0.1) {
-              merged.push(seg[0]);
-              remaining.splice(k, 1);
-              changed = true;
-            } else if (dist(first, seg[1]) < cellW * 0.1) {
-              merged.unshift(seg[0]);
-              remaining.splice(k, 1);
-              changed = true;
-            } else if (dist(first, seg[0]) < cellW * 0.1) {
-              merged.unshift(seg[1]);
-              remaining.splice(k, 1);
-              changed = true;
-            }
+    // 简单合并：距离 < 两倍 cell 的视为相邻
+    const threshold = Math.max(cellW, cellH) * 3;
+    const dist = (a: [number, number], b: [number, number]) =>
+      Math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2);
+
+    const used = new Set<number>();
+    for (let si = 0; si < segments.length; si++) {
+      if (used.has(si)) continue;
+      const chain = [...segments[si]];
+      used.add(si);
+      let grown = true;
+      while (grown) {
+        grown = false;
+        for (let sj = 0; sj < segments.length; sj++) {
+          if (used.has(sj)) continue;
+          if (dist(chain[chain.length - 1], segments[sj][0]) < threshold) {
+            chain.push(segments[sj][1]);
+            used.add(sj);
+            grown = true;
+          } else if (dist(chain[chain.length - 1], segments[sj][1]) < threshold) {
+            chain.push(segments[sj][0]);
+            used.add(sj);
+            grown = true;
+          } else if (dist(chain[0], segments[sj][1]) < threshold) {
+            chain.unshift(segments[sj][0]);
+            used.add(sj);
+            grown = true;
+          } else if (dist(chain[0], segments[sj][0]) < threshold) {
+            chain.unshift(segments[sj][1]);
+            used.add(sj);
+            grown = true;
           }
         }
       }
-
-      if (merged.length >= 2) {
-        contours.push({ elevation: elev, coords: merged });
+      if (chain.length >= 2) {
+        contours.push({ elevation: elev, coords: chain });
       }
     }
   }

@@ -983,7 +983,7 @@ async function executeHazardCommand(cmd: HazardCommand): Promise<{
           });
         };
         window.addEventListener('elevation-grid-result', handler);
-        window.dispatchEvent(new CustomEvent('query-elevation-grid', { detail: { resolution: 25 } }));
+        window.dispatchEvent(new CustomEvent('query-elevation-grid', { detail: { resolution: 40 } }));
         // 超时兜底
         setTimeout(() => {
           window.removeEventListener('elevation-grid-result', handler);
