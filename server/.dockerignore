@@ -1,8 +1,0 @@
-node_modules
-server/users.db
-server/__pycache__
-server/.env
-.mcp.local.json
-.claude
-.git
-*.pyc
