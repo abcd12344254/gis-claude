@@ -56,15 +56,10 @@ def send_verification_code(email: str) -> dict:
         "last_sent": time.time(),
     }
 
-    # 如果没配 SMTP，打印到控制台（开发模式）
+    # 如果没配 SMTP，跳过邮箱验证直接返回验证码
     if not SMTP_HOST or not SMTP_USER:
-        print(f"\n{'='*50}")
-        print(f"📧 验证码（未配置SMTP，控制台输出）")
-        print(f"   收件人: {email}")
-        print(f"   验证码: {code}")
-        print(f"   有效期: {CODE_EXPIRE_SECONDS // 60} 分钟")
-        print(f"{'='*50}\n")
-        return {"success": True, "message": "验证码已发送（开发模式：查看服务器控制台）"}
+        print(f"[DEV] 验证码({email}): {code}")
+        return {"success": True, "message": f"开发模式：验证码 {code}（有效期{CODE_EXPIRE_SECONDS//60}分钟）"}
 
     # SMTP 发送
     try:
