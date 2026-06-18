@@ -59,7 +59,7 @@ def send_verification_code(email: str) -> dict:
     # 如果没配 SMTP，跳过邮箱验证直接返回验证码
     if not SMTP_HOST or not SMTP_USER:
         print(f"[DEV] 验证码({email}): {code}")
-        return {"success": True, "message": f"开发模式：验证码 {code}（有效期{CODE_EXPIRE_SECONDS//60}分钟）"}
+        return {"success": True, "message": f"开发模式：验证码 {code}（有效期{CODE_EXPIRE_SECONDS//60}分钟）", "code": code}
 
     # SMTP 发送
     try:
