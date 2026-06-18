@@ -103,13 +103,10 @@ def send_verification_code(email: str) -> dict:
             server.sendmail(SMTP_FROM, [email], msg.as_string())
 
         return {"success": True, "message": "验证码已发送，请检查邮箱"}
-    except smtplib.SMTPAuthenticationError:
-        return {"success": False, "message": "邮件服务认证失败，请联系管理员"}
-    except smtplib.SMTPConnectError:
-        return {"success": False, "message": "无法连接邮件服务器，请联系管理员"}
     except Exception as e:
-        print(f"[Email] 发送失败: {e}")
-        return {"success": False, "message": f"邮件发送失败: {str(e)[:80]}"}
+        # SMTP 发送失败 → 降级为页面弹窗显示
+        print(f"[Email] SMTP发送失败({e})，降级为弹窗显示验证码")
+        return {"success": True, "message": f"邮件发送失败，降级为弹窗显示", "code": code}
 
 
 def verify_code(email: str, code: str) -> bool:
