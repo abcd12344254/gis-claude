@@ -234,22 +234,30 @@ const LoginPage: React.FC = () => {
           </>
         )}
 
-        {/* ====== 注册 Step 1: 填写信息 ====== */}
-        {activeTab === 'register' && registerStep === 1 && (
+        {/* ====== 注册（直接注册，无需邮箱验证） ====== */}
+        {activeTab === 'register' && (
           <>
             <Tabs activeKey="register" centered style={{ marginBottom: 8 }} items={[
               { key: 'login', label: <a onClick={switchToLogin}>登录</a> },
               { key: 'register', label: '注册' },
             ]} />
-            <Steps current={0} size="small" style={{ marginBottom: 24 }} items={[
-              { title: '填写信息' },
-              { title: '验证邮箱' },
-            ]} />
-            <Form layout="vertical" size="large" onFinish={(values) => {
-              setRegisterEmail(values.email);
-              setRegisterPassword(values.password);
-              setRegisterStep(2);
-              handleSendCode(values.email);
+            <Form layout="vertical" size="large" onFinish={async (values) => {
+              setLoading(true);
+              try {
+                const res = await fetch('/api/auth/register', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(values),
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.detail || '注册失败');
+                setAuth(data.token, data.user);
+                message.success('注册成功！欢迎使用 GIS Claude');
+              } catch (err) {
+                message.error(err instanceof Error ? err.message : '注册失败');
+              } finally {
+                setLoading(false);
+              }
             }}>
               <Form.Item name="email" rules={[{ required: true, message: '请输入邮箱' }, { type: 'email', message: '邮箱格式不正确' }]}>
                 <Input prefix={<MailOutlined style={{ color: '#bfbfbf' }} />} placeholder="邮箱地址" style={{ borderRadius: 8, height: 46 }} />
@@ -258,55 +266,10 @@ const LoginPage: React.FC = () => {
                 <Input.Password prefix={<LockOutlined style={{ color: '#bfbfbf' }} />} placeholder="密码（6 位以上）" style={{ borderRadius: 8, height: 46 }} />
               </Form.Item>
               <Form.Item style={{ marginBottom: 12 }}>
-                <Button type="primary" htmlType="submit" block style={{ height: 46, borderRadius: 8, fontSize: 16, fontWeight: 600, background: 'linear-gradient(135deg, #1677ff, #0958d9)', border: 'none', boxShadow: '0 4px 14px rgba(22,119,255,0.35)' }}>
-                  下一步 · 验证邮箱
-                </Button>
-              </Form.Item>
-            </Form>
-          </>
-        )}
-
-        {/* ====== 注册 Step 2: 输入验证码 ====== */}
-        {activeTab === 'register' && registerStep === 2 && (
-          <>
-            <Steps current={1} size="small" style={{ marginBottom: 24, marginTop: 48 }} items={[
-              { title: '填写信息' },
-              { title: '验证邮箱' },
-            ]} />
-            <Form form={form} onFinish={handleVerifyAndRegister} layout="vertical" size="large">
-              <Form.Item name="code" rules={[{ required: true, message: '请输入验证码' }, { len: 6, message: '验证码为 6 位数字' }]}>
-                <Input
-                  prefix={<SafetyCertificateOutlined style={{ color: '#1677ff' }} />}
-                  placeholder="输入 6 位验证码"
-                  style={{ borderRadius: 8, height: 46, textAlign: 'center', letterSpacing: 4, fontSize: 20 }}
-                  maxLength={6}
-                  autoFocus
-                />
-              </Form.Item>
-              <Form.Item style={{ marginBottom: 12 }}>
                 <Button type="primary" htmlType="submit" loading={loading} block style={{ height: 46, borderRadius: 8, fontSize: 16, fontWeight: 600, background: 'linear-gradient(135deg, #1677ff, #0958d9)', border: 'none', boxShadow: '0 4px 14px rgba(22,119,255,0.35)' }}>
-                  完成注册
+                  注册
                 </Button>
               </Form.Item>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <Button
-                  type="link"
-                  icon={<ArrowLeftOutlined />}
-                  onClick={() => { setRegisterStep(1); setCodeSent(false); setCountdown(0); }}
-                  style={{ padding: 0, color: '#999' }}
-                >
-                  返回修改
-                </Button>
-                <Button
-                  type="link"
-                  onClick={() => handleSendCode()}
-                  loading={sendingCode}
-                  disabled={countdown > 0}
-                  style={{ color: '#1677ff' }}
-                >
-                  {countdown > 0 ? `${countdown}s 后重发` : '重新发送验证码'}
-                </Button>
-              </div>
             </Form>
           </>
         )}
