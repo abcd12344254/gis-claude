@@ -198,8 +198,8 @@ async def auth_verify_email(req: VerifyCodeRequest):
         ok = verify_code(req.email, req.code)
         if not ok:
             raise HTTPException(status_code=400, detail="验证码错误或已过期")
-        if not verify_user_email(req.email):
-            raise HTTPException(status_code=404, detail="用户不存在")
+        # 如果用户已注册则标记验证，未注册也不报错（注册在验证之后）
+        verify_user_email(req.email)
         return {"ok": True, "message": "邮箱验证成功"}
     except HTTPException:
         raise
