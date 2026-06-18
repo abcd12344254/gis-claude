@@ -4,6 +4,7 @@ GIS Claude Backend Server
 """
 import os
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Query, Header, Depends
@@ -43,7 +44,15 @@ from projects import (
 
 load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
-app = FastAPI(title="GIS Claude API", version="1.0.0")
+# ====== Lifespan ======
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    init_project_tables()
+    yield
+
+app = FastAPI(title="GIS Claude API", version="1.0.0", lifespan=lifespan)
 
 # CORS
 app.add_middleware(
@@ -126,12 +135,6 @@ def get_overpass_client() -> httpx.AsyncClient:
 
 # ====== Health ======
 
-@app.on_event("startup")
-async def startup():
-    init_db()
-    init_project_tables()
-
-
 @app.get("/api/health")
 async def health_check():
     return {
@@ -146,10 +149,15 @@ async def health_check():
 
 @app.post("/api/auth/register")
 async def auth_register(req: UserRegister):
-    """注册新用户 — 需先调用 /send-code 获取验证码"""
-    user = create_user(req.email, req.password)
-    token = create_access_token(user["id"], user["email"])
-    return {"token": token, "user": {"id": user["id"], "email": user["email"], "plan": user["plan"], "verified": user.get("verified", 0)}}
+    """注册新用户"""
+    try:
+        user = create_user(req.email, req.password)
+        token = create_access_token(user["id"], user["email"])
+        return {"token": token, "user": {"id": user["id"], "email": user["email"], "plan": user["plan"], "verified": user.get("verified", 0)}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"注册失败: {str(e)}")
 
 
 @app.post("/api/auth/login")
@@ -174,23 +182,29 @@ class VerifyCodeRequest(BaseModel):
 @app.post("/api/auth/send-code")
 async def auth_send_code(req: SendCodeRequest):
     """发送邮箱验证码"""
-    # 检查邮箱是否已被注册
-    existing = get_user_by_email(req.email)
-    if existing and existing.get("verified"):
-        return {"success": False, "message": "该邮箱已注册，请直接登录"}
-    return send_verification_code(req.email)
+    try:
+        existing = get_user_by_email(req.email)
+        if existing and existing.get("verified"):
+            return {"success": False, "message": "该邮箱已注册，请直接登录"}
+        return send_verification_code(req.email)
+    except Exception as e:
+        return {"success": False, "message": f"发送失败: {str(e)}"}
 
 
 @app.post("/api/auth/verify-email")
 async def auth_verify_email(req: VerifyCodeRequest):
-    """验证邮箱验证码并激活账号"""
-    ok = verify_code(req.email, req.code)
-    if not ok:
-        raise HTTPException(status_code=400, detail="验证码错误或已过期")
-    # 激活用户
-    if not verify_user_email(req.email):
-        raise HTTPException(status_code=404, detail="用户不存在")
-    return {"ok": True, "message": "邮箱验证成功"}
+    """验证邮箱验证码"""
+    try:
+        ok = verify_code(req.email, req.code)
+        if not ok:
+            raise HTTPException(status_code=400, detail="验证码错误或已过期")
+        if not verify_user_email(req.email):
+            raise HTTPException(status_code=404, detail="用户不存在")
+        return {"ok": True, "message": "邮箱验证成功"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"验证失败: {str(e)}")
 
 
 @app.get("/api/auth/me")
