@@ -1,0 +1,171 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, 'Noto Sans', sans-serif;
+}
+
+/* MapLibre overrides */
+.maplibregl-popup {
+  max-width: 300px !important;
+}
+
+.maplibregl-popup-content {
+  border-radius: 8px !important;
+  padding: 12px 16px !important;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.15) !important;
+}
+
+.maplibregl-ctrl-group {
+  border-radius: 8px !important;
+  overflow: hidden;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1) !important;
+}
+
+/* Layer panel styles */
+.layer-item {
+  transition: all 0.2s ease;
+  border-radius: 6px;
+  margin-bottom: 4px;
+}
+
+.layer-item:hover {
+  background: #f0f5ff;
+}
+
+.layer-item.active {
+  background: #e6f4ff;
+  border: 1px solid #91caff;
+}
+
+/* Drawing cursor */
+.drawing-cursor {
+  cursor: crosshair !important;
+}
+
+.drawing-cursor * {
+  cursor: crosshair !important;
+}
+
+/* Chat message animations */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.chat-message-enter {
+  animation: fadeInUp 0.3s ease forwards;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #d9d9d9;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #bfbfbf;
+}
+
+/* Analysis result card */
+.analysis-result {
+  background: #f6ffed;
+  border: 1px solid #b7eb8f;
+  border-radius: 8px;
+  padding: 12px;
+  margin-top: 8px;
+}
+
+.analysis-result.error {
+  background: #fff2f0;
+  border-color: #ffccc7;
+}
+
+/* Tool button active state */
+.tool-btn-active {
+  color: #1677ff !important;
+  background: #e6f4ff !important;
+  border-color: #91caff !important;
+}
+
+/* Measurement label */
+.measurement-label {
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* ====== 移动端适配 ====== */
+@media (max-width: 768px) {
+  /* 地图控件缩小 */
+  .maplibregl-ctrl-group {
+    transform: scale(0.85);
+    transform-origin: top right;
+  }
+
+  .maplibregl-ctrl-bottom-left {
+    bottom: 100px !important; /* 给浮动按钮留空间 */
+  }
+
+  /* 弹窗全屏宽度 */
+  .ant-popover,
+  .ant-popconfirm {
+    max-width: 90vw !important;
+  }
+
+  /* 抽屉内滚动 */
+  .ant-drawer-body {
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* 触摸友好的按钮间距 */
+  .ant-btn {
+    touch-action: manipulation;
+  }
+}
+
+/* 登录页移动端：隐藏左侧品牌区 */
+@media (max-width: 768px) {
+  .login-brand-panel {
+    display: none !important;
+  }
+}
+
+/* 小屏手机进一步优化 */
+@media (max-width: 480px) {
+  .maplibregl-ctrl-group {
+    transform: scale(0.7);
+  }
+
+  .maplibregl-ctrl-bottom-left {
+    bottom: 110px !important;
+  }
+}

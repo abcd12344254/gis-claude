@@ -1,0 +1,30 @@
+{
+  "enableAllProjectMcpServers": true,
+  "permissions": {
+    "allow": [
+      "Bash(npm run dev)",
+      "Bash(npm run build)",
+      "Bash(npm run server)",
+      "Bash(npx tsc --noEmit)",
+      "Bash(cd server && python main.py)",
+      "Bash(curl -s http://localhost:*)",
+      "Bash(start http://localhost:*)",
+      "Bash(netstat *)",
+      "Bash(taskkill *)",
+      "mcp__filesystem"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"C:/Users/刘炜航/gis-claude\" && npx tsc --noEmit 2>&1"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "C:/Users/刘炜航/gis-claude",
+        "C:/Users/刘炜航/Desktop",
+        "C:/Users/刘炜航/Desktop/GIS/public/HanDan",
+        "C:/Users/刘炜航/Desktop/GIS/public",
+        "C:/Users/刘炜航/Downloads"
+      ],
+      "description": "项目文件 + 桌面 + GIS 数据目录 + 下载目录"
+    },
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp"
+      ],
+      "description": "浏览器自动化：测试 GIS 前端、截图验证地图渲染、调试 UI 交互"
+    },
+    "context7": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@context7/mcp"
+      ],
+      "description": "跨会话上下文管理：长会话不丢失项目上下文"
+    },
+    "serena": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@serena/mcp"
+      ],
+      "description": "代码理解与导航：追踪组件引用、分析数据流、重构辅助"
+    }
+  }
+}

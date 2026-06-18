@@ -1,0 +1,30 @@
+# MCP local config (contains tokens)
+.mcp.local.json
+
+# dependencies
+node_modules/
+
+# build
+dist/
+*.tsbuildinfo
+
+# env
+.env
+
+# database (contains user data)
+server/users.db
+
+# Python
+server/__pycache__/
+*.pyc
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# logs
+*.log
