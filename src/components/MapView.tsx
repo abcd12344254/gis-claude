@@ -330,8 +330,9 @@ const MapView: React.FC = () => {
 
         // 构建样式 layers
         const addStyleLayers = () => {
+          const firstFeature = layer.data?.features?.[0];
+          const isHazard = firstFeature?.properties?._hazardType;
           if (layer.type === 'polygon' || layer.type === 'geojson') {
-            const firstFeature = layer.data?.features?.[0];
             const isExtrusion = firstFeature?.properties?._extrusionHeight != null;
 
             if (isExtrusion) {
@@ -374,7 +375,6 @@ const MapView: React.FC = () => {
             });
           }
           if (layer.type === 'point' || layer.type === 'geojson') {
-            const isHazard = firstFeature?.properties?._hazardType;
             map.addLayer({
               id: circleLayerId, type: 'circle', source: sourceId,
               filter: ['any', ['==', ['geometry-type'], 'Point'], ['==', ['geometry-type'], 'MultiPoint']],

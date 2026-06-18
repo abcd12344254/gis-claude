@@ -1414,8 +1414,9 @@ ${text}`;
             timestamp: Date.now(),
           });
           if (result.geojson) {
+            const geo = result.geojson;
             setTimeout(() => {
-              const bbox = getFCBounds(result.geojson);
+              const bbox = getFCBounds(geo);
               if (bbox) window.dispatchEvent(new CustomEvent('zoom-to-bounds', { detail: bbox }));
             }, 400);
           }
