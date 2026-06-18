@@ -59,7 +59,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { planRoute, getRouteBounds } from '../services/routingService';
 import type { RouteResult, TravelMode } from '../services/routingService';
-import { queryEarthquakes } from '../services/hazardService';
+import { queryEarthquakes, sampleElevationGrid, generateContours, elevationColor } from '../services/hazardService';
 import { flattenCoords, getFCBounds } from '../utils/geo';
 
 const { Text } = Typography;
@@ -226,8 +226,11 @@ const GEOJSON_INSTRUCTION = `
 \`\`\`
 [HAZARD:earthquake:4.0]   — 查询当前视野 M≥4.0 地震（近90天）
 [HAZARD:earthquake]       — 查询当前视野 M≥3.0 地震
+[HAZARD:elevation:100]    — 生成等高线（等高距 100m，需先开3D地形）
+[HAZARD:elevation]        — 生成等高线（默认等高距 100m）
 \`\`\`
-当用户提到"地震"、"地震带"、"最近地震"、"地质灾害"时，生成对应指令。
+当用户提到"地震"、"地震带"、"最近地震"、"地质灾害"时，生成 earthquake 指令。
+当用户提到"等高线"、"地形"、"海拔"、"高程"时，生成 elevation 指令。先开3D地形。
 地震数据来自 USGS 全球免费。
 
 ### ⚠️ 绝对规则 —— 违反将导致查询失败！
@@ -933,6 +936,41 @@ async function executeHazardCommand(cmd: HazardCommand): Promise<{
         });
       }
       return { description: result.description, geojson: result.geojson };
+    }
+    case 'elevation': {
+      // 需要 terrain 已启用；先尝试获取 map 引用
+      const mapEl = document.querySelector('.maplibregl-map') as any;
+      const map = mapEl?._map || mapEl?.map || null;
+      if (!map || typeof map.queryTerrainElevation !== 'function') {
+        return { description: '⚠️ 等高线需要先开启 3D 地形（点顶部工具栏的 3D 按钮）', geojson: null };
+      }
+      const bbox: [number, number, number, number] = [bounds[0], bounds[1], bounds[2], bounds[3]];
+      const interval = cmd.param ? parseInt(cmd.param) : 100;
+      const grid = sampleElevationGrid(map as any, bbox, 25);
+      const contours = generateContours(grid, bbox, 25, isNaN(interval) ? 100 : interval);
+      if (contours.length === 0) {
+        return { description: '⚠️ 未生成等高线，请确认已开启3D地形且视野内有地形起伏', geojson: null };
+      }
+      const fc: FeatureCollection = {
+        type: 'FeatureCollection',
+        features: contours.map(c => ({
+          type: 'Feature',
+          geometry: { type: 'LineString', coordinates: c.coords },
+          properties: { elevation: c.elevation, _lineColor: elevationColor(c.elevation) },
+        })),
+      };
+      const { addLayer } = store;
+      addLayer({
+        id: '', name: `等高线_${isNaN(interval) ? 100 : interval}m`,
+        type: 'geojson', visible: true,
+        color: '#27ae60', opacity: 0.7,
+        data: fc,
+        sourceId: '', layerId: '', createdAt: Date.now(),
+      });
+      return {
+        description: `🏔️ 等高线已生成 (${contours.length} 条, 等高距 ${isNaN(interval) ? 100 : interval}m)`,
+        geojson: fc,
+      };
     }
     default:
       return { description: `⚠️ 未知灾害查询类型: ${cmd.type}`, geojson: null };
