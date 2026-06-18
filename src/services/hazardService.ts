@@ -164,10 +164,15 @@ export function generateContours(
   const N = resolution + 1;
 
   // 辅助：从 grid (1D) 获取 (col, row) 位置的高程
+  // grid 按 (j*N + i) 存储，即 col=i, row=j → grid[j*N + i]
   const getElev = (col: number, row: number): number | null => {
     if (col < 0 || col >= N || row < 0 || row >= N) return null;
     return grid[row * N + col]?.elevation ?? null;
   };
+
+  // 确认 grid 存储顺序与 sampleElevationGrid 一致 (col major: i→col, j→row)
+  // sampleElevationGrid: for i=0..resolution (col) for j=0..resolution (row) push({lng,lat,elev})
+  // 存储顺序: (0,0),(0,1),...,(0,N),(1,0),... → index = row*N + col ✓
 
   // 对每个高程等值面
   for (let elev = minElev; elev <= maxElev; elev += interval) {
@@ -186,7 +191,7 @@ export function generateContours(
         if (code === 0 || code === 15) continue;
 
         const lerp = (va: number, vb: number): number => {
-          if (Math.abs(vb - va) < 0.01) return 0.5;
+          if (Math.abs(vb - va) < 1) return 0.5;
           return Math.max(0, Math.min(1, (elev - va) / (vb - va)));
         };
 
@@ -203,17 +208,19 @@ export function generateContours(
           left:   [cx, by - lerp(v00, v01) * cellH],
         };
 
-        // 经典 marching squares 16 cases
+        // 标准 marching squares 16 cases 线段连接表
+        // a[0]=tl, a[1]=tr, a[2]=br, a[3]=bl; code = Σ bit_i
         const pairs: [string, string][] = [];
         switch (code) {
-          case 1: case 14: pairs.push(['left', 'bottom']); break;
-          case 2: case 13: pairs.push(['bottom', 'right']); break;
-          case 3: case 12: pairs.push(['left', 'right']); break;
-          case 4: case 11: pairs.push(['top', 'right']); break;
-          case 5: pairs.push(['top', 'left']); pairs.push(['bottom', 'right']); break;
-          case 6: case 9:  pairs.push(['top', 'bottom']); break;
-          case 7: case 8:  pairs.push(['top', 'left']); break;
-          case 10: pairs.push(['top', 'right']); pairs.push(['bottom', 'left']); break;
+          case 0: case 15: break; // 全下/全上，无线段
+          case 1: case 14: pairs.push(['left',  'top']);    break;
+          case 2: case 13: pairs.push(['top',   'right']);  break;
+          case 3: case 12: pairs.push(['left',  'right']);  break;
+          case 4: case 11: pairs.push(['right', 'bottom']); break;
+          case 5: pairs.push(['top','left'], ['bottom','right']); break;
+          case 6: case 9:  pairs.push(['top',   'bottom']); break;
+          case 7: case 8:  pairs.push(['left',  'bottom']); break;
+          case 10: pairs.push(['top','right'], ['bottom','left']); break;
         }
         for (const [k1, k2] of pairs) {
           segments.push([pt[k1], pt[k2]]);
