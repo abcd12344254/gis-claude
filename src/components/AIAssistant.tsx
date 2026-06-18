@@ -196,6 +196,7 @@ const GEOJSON_INSTRUCTION = `
   · "开车/驾车/自驾" → driving
   · "步行/走路/走过去" → walking
   · "骑行/骑车/自行车" → cycling
+  · "飞/飞行/坐飞机/飞到" → flying
   · 没有明确方式 → 默认 driving
 
 🚫 **重要：路线查询时不要生成 OSM/ANALYSIS/MAP 指令！**
@@ -871,6 +872,7 @@ function parseRouteCommands(text: string): RouteCommand[] {
     const mode: TravelMode =
       modeStr === 'walking' || modeStr === '步行' ? 'walking'
       : modeStr === 'cycling' || modeStr === '骑行' || modeStr === 'bicycle' ? 'cycling'
+      : modeStr === 'flying' || modeStr === '飞行' || modeStr === 'fly' ? 'flying'
       : 'driving';
     cmds.push({ from, to, mode });
   }
@@ -894,6 +896,7 @@ async function executeRouteCommand(
     driving: '#1677ff',
     walking: '#52c41a',
     cycling: '#fa8c16',
+    flying: '#e040fb',
   };
 
   addLayer({

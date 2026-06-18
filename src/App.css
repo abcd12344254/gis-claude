@@ -125,41 +125,29 @@ body,
 
 /* ====== 移动端适配 ====== */
 @media (max-width: 768px) {
-  /* 地图控件缩小 */
   .maplibregl-ctrl-group {
     transform: scale(0.85);
     transform-origin: top right;
   }
 
   .maplibregl-ctrl-bottom-left {
-    bottom: 100px !important; /* 给浮动按钮留空间 */
+    bottom: 100px !important;
   }
 
-  /* 弹窗全屏宽度 */
   .ant-popover,
   .ant-popconfirm {
     max-width: 90vw !important;
   }
 
-  /* 抽屉内滚动 */
   .ant-drawer-body {
     -webkit-overflow-scrolling: touch;
   }
 
-  /* 触摸友好的按钮间距 */
   .ant-btn {
     touch-action: manipulation;
   }
 }
 
-/* 登录页移动端：隐藏左侧品牌区 */
-@media (max-width: 768px) {
-  .login-brand-panel {
-    display: none !important;
-  }
-}
-
-/* 小屏手机进一步优化 */
 @media (max-width: 480px) {
   .maplibregl-ctrl-group {
     transform: scale(0.7);
@@ -167,5 +155,12 @@ body,
 
   .maplibregl-ctrl-bottom-left {
     bottom: 110px !important;
+  }
+}
+
+/* 登录页移动端：隐藏左侧品牌区 */
+@media (max-width: 768px) {
+  .login-brand-panel {
+    display: none !important;
   }
 }

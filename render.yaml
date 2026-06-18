@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: gis-claude
+    env: python
+    buildCommand: pip install -r server/requirements.txt && npm install && npm run build
+    startCommand: cd server && python main.py
+    envVars:
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: GAODE_API_KEY
+        sync: false
+      - key: PORT
+        value: "8001"

@@ -18,7 +18,7 @@ const GAODE_GEOCODE_URL = '/api/gaode/geocode';
 
 // ====== 类型定义 ======
 
-export type TravelMode = 'driving' | 'walking' | 'cycling';
+export type TravelMode = 'driving' | 'walking' | 'cycling' | 'flying';
 
 export interface RouteStep {
   distance: number;       // 米
@@ -277,7 +277,54 @@ const MODE_PROFILES: Record<TravelMode, string> = {
   driving: 'driving',
   walking: 'walking',
   cycling: 'cycling',
+  flying: 'driving', // 飞行不走 OSRM，占位
 };
+
+/** 大圆航线弧线：球面插值 + 中点强制拱起 */
+function buildGreatCircleArc(from: [number, number], to: [number, number]): GeoJSON.LineString {
+  const steps = 80;
+  const coords: [number, number][] = [];
+
+  const lat1 = from[1] * Math.PI / 180;
+  const lon1 = from[0] * Math.PI / 180;
+  const lat2 = to[1] * Math.PI / 180;
+  const lon2 = to[0] * Math.PI / 180;
+
+  // 大圆角距
+  const d = 2 * Math.asin(Math.sqrt(
+    Math.sin((lat2 - lat1) / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin((lon2 - lon1) / 2) ** 2
+  ));
+
+  // 飞行距离（km），决定拱起程度
+  const distKm = d * 6371;
+  // 拱起系数：距离越远拱起越大（最少也有可见弧度）
+  const bowFactor = Math.max(0.05, Math.min(0.4, distKm / 8000));
+
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    if (d < 1e-10) {
+      coords.push([from[0], from[1]]);
+      continue;
+    }
+    // 球面插值
+    const a = Math.sin((1 - t) * d) / Math.sin(d);
+    const b = Math.sin(t * d) / Math.sin(d);
+    const x = a * Math.cos(lat1) * Math.cos(lon1) + b * Math.cos(lat2) * Math.cos(lon2);
+    const y = a * Math.cos(lat1) * Math.sin(lon1) + b * Math.cos(lat2) * Math.sin(lon2);
+    const z = a * Math.sin(lat1) + b * Math.sin(lat2);
+    let lat = Math.atan2(z, Math.sqrt(x * x + y * y)) * 180 / Math.PI;
+    let lon = Math.atan2(y, x) * 180 / Math.PI;
+
+    // 中点强制拱起：模拟高空航线向北弯曲
+    const bow = Math.sin(t * Math.PI) * bowFactor * Math.abs(to[0] - from[0]);
+    const northDir = (lat1 + lat2) / 2 > 0 ? 1 : -1; // 北半球向北拱
+    lat += bow * northDir;
+
+    coords.push([lon, lat]);
+  }
+  return { type: 'LineString', coordinates: coords };
+}
 
 /**
  * 计算两点之间的路径
@@ -356,6 +403,7 @@ const MODE_LABELS: Record<TravelMode, string> = {
   driving: '驾车',
   walking: '步行',
   cycling: '骑行',
+  flying: '飞行',
 };
 
 /**
@@ -415,7 +463,31 @@ export async function planRoute(
     const fromCoord: [number, number] = [parseFloat(fromGeo.lon), parseFloat(fromGeo.lat)];
     const toCoord: [number, number] = [parseFloat(toGeo.lon), parseFloat(toGeo.lat)];
 
-    // 2. OSRM 路径规划
+    // 2. 飞行模式：大圆航线，不走 OSRM
+    if (mode === 'flying') {
+      const greatCircle = buildGreatCircleArc(fromCoord, toCoord);
+      const distM = haversineDistance(fromCoord, toCoord); // 米
+      const distKm = distM / 1000;
+      const hours = distKm / 800; // 客机约 800 km/h
+      const durationMin = Math.round(hours * 60);
+      return {
+        success: true,
+        geojson: { type: 'FeatureCollection', features: [{ type: 'Feature', geometry: greatCircle, properties: {} }] },
+        distance: Math.round(distM),
+        duration: durationMin * 60,
+        steps: [{
+          distance: Math.round(distM),
+          duration: durationMin * 60,
+          instruction: `从${from}直飞${to}`,
+          name: '大圆航线',
+        }],
+        startName: fromGeo.display_name,
+        endName: toGeo.display_name,
+        description: `✈️ ${from} → ${to} | 直线距离 ${distKm < 100 ? distKm.toFixed(0) + 'km' : (distKm / 1000).toFixed(1) + '千km'} | 约 ${durationMin < 60 ? durationMin + '分钟' : Math.floor(durationMin / 60) + 'h' + (durationMin % 60) + 'min'}`,
+      };
+    }
+
+    // 3. OSRM 路径规划（地面交通）
     const route = await osrmRoute(fromCoord, toCoord, mode);
 
     if (!route) {

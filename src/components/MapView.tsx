@@ -1,8 +1,9 @@
 import React, { useRef, useEffect, useCallback, useState } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
+import * as turf from '@turf/turf';
 import { useGISStore } from '../store/useGISStore';
-import type { FeatureCollection } from 'geojson';
+import type { FeatureCollection, LineString, Point } from 'geojson';
 import { measureDistance, measureArea } from '../services/spatialAnalysis';
 
 const TERRAIN_DEM_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
@@ -68,6 +69,7 @@ const MapView: React.FC = () => {
     measurementActive,
     setMeasurementActive,
     addLayer,
+    terrain3dEnabled,
   } = useGISStore();
 
   const [measurePoints, setMeasurePoints] = useState<[number, number][]>([]);
@@ -860,15 +862,336 @@ const MapView: React.FC = () => {
     };
   }, [drawing.active, drawing.type, drawPoints, addLayer]);
 
+  // ====== 路线动画 ======
+  const animMarkerRef = useRef<maplibregl.Marker | null>(null);
+  const animFrameRef = useRef<number>(0);
+  const [routeAnimating, setRouteAnimating] = useState(false);
+  const [routeAnimLabel, setRouteAnimLabel] = useState('');
+  const [speedLevel, setSpeedLevel] = useState(4); // 1-7 档，默认4=2×
+  const speedRef = useRef(4);
+  const routeAnimDataRef = useRef<{
+    coords: [number, number][];
+    mode: string;
+    totalLen: number;
+    startTime: number;
+    baseTraveled: number;
+    map: maplibregl.Map;
+  } | null>(null);
+
+  const SPEED_MULTIPLIERS = [0.3, 0.6, 1, 2, 4, 8, 16]; // 对应 1-7 档
+
+  // 出行方式对应图标
+  const MODE_ICONS: Record<string, string> = {
+    walking: '🚶',
+    cycling: '🚴',
+    driving: '🚗',
+    flying: '✈️',
+  };
+
+  const MODE_SPEEDS: Record<string, number> = {
+    walking: 80,
+    cycling: 180,
+    driving: 500,
+    flying: 3000,
+  };
+
+  const camBtnS: React.CSSProperties = {
+    width: 30, height: 28, background: 'transparent', color: '#fff',
+    border: 'none', cursor: 'pointer', fontSize: 14,
+    textAlign: 'center', borderRadius: 4, lineHeight: '28px',
+  };
+
+  // 检测路线图层并推断出行方式
+  const detectRouteLayer = useCallback(() => {
+    const routeLayer = layers.find(l =>
+      l.visible && l.data && (l.name.includes('→') || l.name.includes('路线'))
+    );
+    if (!routeLayer || !routeLayer.data) return null;
+    const lineFeat = routeLayer.data!.features.find(
+      f => f.geometry?.type === 'LineString'
+    );
+    if (!lineFeat) return null;
+    const coords = (lineFeat.geometry as LineString).coordinates as [number, number][];
+    if (coords.length < 2) return null;
+
+    // 推断出行方式
+    let mode = 'driving';
+    const name = routeLayer.name.toLowerCase();
+    const color = (routeLayer.color || '').toLowerCase();
+    if (name.includes('飞行') || name.includes('fly') || color === '#e040fb') mode = 'flying';
+    else if (name.includes('步行') || name.includes('walk') || color === '#52c41a') mode = 'walking';
+    else if (name.includes('骑行') || name.includes('自行车') || name.includes('cycling') || color === '#fa8c16') mode = 'cycling';
+
+    return { coords, mode, name: routeLayer.name };
+  }, [layers]);
+
+  // 启动动画
+  const startRouteAnim = useCallback(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    const route = detectRouteLayer();
+    if (!route) return;
+
+    const icon = MODE_ICONS[route.mode] || '🚗';
+    setRouteAnimLabel(`${icon} ${route.name}`);
+
+    // 飞行模式：自动开启 3D 地形 + 倾斜视角
+    if (route.mode === 'flying') {
+      const source = map.getSource('osm-tiles') as maplibregl.RasterTileSource;
+      if (source) {
+        source.setTiles(['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}']);
+      }
+      if (map.getLayer('hillshade-layer')) {
+        map.setLayoutProperty('hillshade-layer', 'visibility', 'visible');
+      }
+      try { map.setTerrain({ source: 'terrain-dem', exaggeration: 1.5 }); } catch {}
+      map.flyTo({ pitch: 60, duration: 1500 });
+      useGISStore.getState().setTerrain3dEnabled(true);
+    }
+
+    // 清理旧动画
+    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+    if (animMarkerRef.current) animMarkerRef.current.remove();
+
+    // 创建动画标记
+    const el = document.createElement('div');
+    el.style.cssText = `
+      font-size: 28px;
+      filter: drop-shadow(0 2px 4px rgba(0,0,0,0.4));
+      transform: translate(-50%, -100%);
+      transition: none;
+      pointer-events: none;
+      z-index: 999;
+    `;
+    el.textContent = icon;
+
+    const marker = new maplibregl.Marker({ element: el, anchor: 'bottom' })
+      .setLngLat(route.coords[0])
+      .addTo(map);
+    animMarkerRef.current = marker;
+
+    const totalLen = turf.length(turf.lineString(route.coords), { units: 'meters' });
+    const speed = MODE_SPEEDS[route.mode] || 80;
+
+    const startTime = performance.now();
+
+    routeAnimDataRef.current = {
+      coords: route.coords,
+      mode: route.mode,
+      totalLen,
+      startTime,
+      baseTraveled: 0,
+      map,
+    };
+
+    setRouteAnimating(true);
+    setSpeedLevel(4); // 默认 2×
+    speedRef.current = 4;
+
+    const animate = (now: number) => {
+      const data = routeAnimDataRef.current;
+      if (!data) return;
+
+      const elapsed = (now - data.startTime) / 1000;
+      const mult = SPEED_MULTIPLIERS[speedRef.current - 1] || 1;
+      const traveled = Math.min(elapsed * speed * mult, data.totalLen * 1.02);
+
+      const line = turf.lineString(data.coords);
+      const dist = Math.min(traveled / 1000, data.totalLen / 1000);
+      try {
+        const pt = turf.along(line, dist, { units: 'kilometers' });
+        const lngLat: [number, number] = [
+          (pt.geometry as Point).coordinates[0],
+          (pt.geometry as Point).coordinates[1],
+        ];
+        marker.setLngLat(lngLat);
+        map.easeTo({ center: lngLat, duration: 300 });
+      } catch { /* 超出路径 */ }
+
+      if (traveled >= data.totalLen) {
+        setRouteAnimating(false);
+        routeAnimDataRef.current = null;
+        return;
+      }
+
+      animFrameRef.current = requestAnimationFrame(animate);
+    };
+
+    animFrameRef.current = requestAnimationFrame(animate);
+  }, [detectRouteLayer]);
+
+  // 调整速度：重设 startTime 使当前位置不变
+  const changeSpeed = useCallback((delta: number) => {
+    const newLevel = Math.max(1, Math.min(7, speedRef.current + delta));
+    const oldMult = SPEED_MULTIPLIERS[speedRef.current - 1] || 1;
+    const newMult = SPEED_MULTIPLIERS[newLevel - 1] || 1;
+    speedRef.current = newLevel;
+    setSpeedLevel(newLevel);
+    const data = routeAnimDataRef.current;
+    if (data) {
+      const now = performance.now();
+      const elapsed = (now - data.startTime) / 1000;
+      const traveled = elapsed * (MODE_SPEEDS[data.mode] || 80) * oldMult;
+      // 反推新的 startTime，保持已走过的距离不变
+      data.startTime = now - (traveled / ((MODE_SPEEDS[data.mode] || 80) * newMult)) * 1000;
+    }
+  }, []);
+
+  // 停止动画
+  const stopRouteAnim = useCallback(() => {
+    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+    if (animMarkerRef.current) {
+      animMarkerRef.current.remove();
+      animMarkerRef.current = null;
+    }
+    routeAnimDataRef.current = null;
+    setRouteAnimating(false);
+    setRouteAnimLabel('');
+  }, []);
+
+  // 路线图层变化时自动检测
+  const routeLayer = layers.find(l => l.visible && l.data && l.name.includes('→'));
+  const hasRoute = !!routeLayer;
+
+  // 飞行路线图层出现时自动开启 3D 地形
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    const isFlyingRoute = layers.some(l =>
+      l.visible && l.data && l.name.includes('→') && l.color === '#e040fb'
+    );
+    if (isFlyingRoute) {
+      const source = map.getSource('osm-tiles') as maplibregl.RasterTileSource;
+      if (source) {
+        source.setTiles(['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}']);
+      }
+      if (map.getLayer('hillshade-layer')) {
+        map.setLayoutProperty('hillshade-layer', 'visibility', 'visible');
+      }
+      try { map.setTerrain({ source: 'terrain-dem', exaggeration: 1.5 }); } catch {}
+      map.flyTo({ pitch: 60, duration: 1500 });
+      useGISStore.getState().setTerrain3dEnabled(true);
+    }
+  }, [layers]);
+
   return (
-    <div
-      ref={mapContainer}
-      style={{
-        width: '100%',
-        height: '100%',
-        cursor: drawing.active || measurementActive ? 'crosshair' : undefined,
-      }}
-    />
+    <div style={{ width: '100%', height: '100%', position: 'relative' }}>
+      <div
+        ref={mapContainer}
+        style={{
+          width: '100%',
+          height: '100%',
+          cursor: drawing.active || measurementActive ? 'crosshair' : undefined,
+        }}
+      />
+
+      {/* ====== 路线动画控制条 ====== */}
+      {hasRoute && (
+        <div style={{
+          position: 'absolute', bottom: 20, left: '50%', transform: 'translateX(-50%)',
+          background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(8px)',
+          borderRadius: 20, padding: '7px 18px',
+          display: 'flex', alignItems: 'center', gap: 12,
+          border: '1px solid rgba(255,255,255,0.15)',
+          boxShadow: '0 4px 20px rgba(0,0,0,0.4)',
+          zIndex: 900,
+          fontFamily: '-apple-system,BlinkMacSystemFont,sans-serif',
+        }}>
+          {!routeAnimating ? (
+            <>
+              <span style={{ color: '#fff', fontSize: 13, fontWeight: 600 }}>
+                🧭 路线已生成
+              </span>
+              <button
+                onClick={startRouteAnim}
+                style={{
+                  background: 'linear-gradient(135deg, #1677ff, #0958d9)',
+                  color: '#fff', border: 'none', borderRadius: 14,
+                  padding: '5px 16px', cursor: 'pointer',
+                  fontSize: 13, fontWeight: 600,
+                  boxShadow: '0 2px 8px rgba(22,119,255,0.4)',
+                }}
+              >
+                ▶ 播放动画
+              </button>
+            </>
+          ) : (
+            <>
+              <span style={{ color: '#00e676', fontSize: 13, marginRight: 4 }}>{routeAnimLabel}</span>
+              <button onClick={() => changeSpeed(-1)}
+                disabled={speedLevel <= 1}
+                style={{
+                  background: speedLevel <= 1 ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.12)',
+                  color: speedLevel <= 1 ? '#666' : '#fff',
+                  border: 'none', borderRadius: 10, width: 26, height: 26,
+                  cursor: speedLevel <= 1 ? 'default' : 'pointer',
+                  fontSize: 14, fontWeight: 700, lineHeight: '26px', textAlign: 'center',
+                }}
+              >−</button>
+              <span style={{ color: '#ffab00', fontSize: 12, fontWeight: 700, minWidth: 32, textAlign: 'center' }}>
+                {speedLevel === 4 ? '2×' : speedLevel === 5 ? '4×' : speedLevel === 6 ? '8×' : speedLevel === 7 ? '16×' : speedLevel === 3 ? '1×' : speedLevel === 2 ? '0.6×' : '0.3×'}
+              </span>
+              <button onClick={() => changeSpeed(1)}
+                disabled={speedLevel >= 7}
+                style={{
+                  background: speedLevel >= 7 ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.12)',
+                  color: speedLevel >= 7 ? '#666' : '#fff',
+                  border: 'none', borderRadius: 10, width: 26, height: 26,
+                  cursor: speedLevel >= 7 ? 'default' : 'pointer',
+                  fontSize: 14, fontWeight: 700, lineHeight: '26px', textAlign: 'center',
+                }}
+              >+</button>
+              <button
+                onClick={stopRouteAnim}
+                style={{
+                  background: 'rgba(255,255,255,0.15)',
+                  color: '#fff', border: '1px solid rgba(255,255,255,0.25)',
+                  borderRadius: 14, padding: '4px 12px', cursor: 'pointer',
+                  fontSize: 12, fontWeight: 600,
+                }}
+              >
+                ⏹
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ====== 3D 视角控制 ====== */}
+      {terrain3dEnabled && (
+        <div style={{
+          position: 'absolute', right: 12, top: 100,
+          display: 'flex', flexDirection: 'column', gap: 4,
+          background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(6px)',
+          borderRadius: 8, padding: 6,
+          border: '1px solid rgba(255,255,255,0.12)',
+          boxShadow: '0 2px 12px rgba(0,0,0,0.3)',
+          zIndex: 800,
+        }}>
+          <button onClick={() => {
+            const m = mapRef.current;
+            if (m) m.easeTo({ pitch: Math.min(80, (m.getPitch() || 0) + 15), duration: 400 });
+          }} title="俯角+" style={camBtnS}>🔽</button>
+          <button onClick={() => {
+            const m = mapRef.current;
+            if (m) m.easeTo({ pitch: Math.max(0, (m.getPitch() || 0) - 15), duration: 400 });
+          }} title="俯角−" style={camBtnS}>🔼</button>
+          <button onClick={() => {
+            const m = mapRef.current;
+            if (m) m.easeTo({ bearing: ((m.getBearing() || 0) - 30 + 360) % 360, duration: 400 });
+          }} title="左转" style={camBtnS}>↺</button>
+          <button onClick={() => {
+            const m = mapRef.current;
+            if (m) m.easeTo({ bearing: ((m.getBearing() || 0) + 30) % 360, duration: 400 });
+          }} title="右转" style={camBtnS}>↻</button>
+          <button onClick={() => {
+            const m = mapRef.current;
+            if (m) m.easeTo({ pitch: 0, bearing: 0, duration: 600 });
+          }} title="重置视角" style={{ ...camBtnS, borderTop: '1px solid rgba(255,255,255,0.12)', marginTop: 2, paddingTop: 6 }}>🏠</button>
+        </div>
+      )}
+    </div>
   );
 };
 

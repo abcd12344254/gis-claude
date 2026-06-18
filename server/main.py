@@ -4,10 +4,12 @@ GIS Claude Backend Server
 """
 import os
 import json
+from pathlib import Path
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Query, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import httpx
 from dotenv import load_dotenv
@@ -860,10 +862,32 @@ async def gaode_poi_search(
         raise HTTPException(status_code=502, detail=f"高德POI搜索失败: {str(e)}")
 
 
+# ====== 前端静态文件（生产环境部署用） ======
+
+FRONTEND_DIR = Path(__file__).parent.parent / "dist"
+
+if FRONTEND_DIR.exists():
+    # 静态资源
+    app.mount("/assets", StaticFiles(directory=FRONTEND_DIR / "assets"), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_frontend(full_path: str):
+        """SPA 回退：先匹配静态文件，再返回 index.html"""
+        # 跳过 API 路径
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404)
+        file_path = FRONTEND_DIR / full_path
+        if file_path.exists() and file_path.is_file():
+            return FileResponse(file_path)
+        return FileResponse(FRONTEND_DIR / "index.html")
+
+
 if __name__ == "__main__":
     import uvicorn
+    port = int(os.getenv("PORT", "8001"))
     print(f"Starting GIS Claude API server...")
     print(f"OSM proxy: {OSM_PROXY or 'direct (may be blocked in China)'}")
     print(f"Gaode API: {'configured' if GAODE_API_KEY else 'not configured (set GAODE_API_KEY in .env)'}")
-    print(f"Set HTTPS_PROXY in server/.env if you have a VPN/proxy")
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    if FRONTEND_DIR.exists():
+        print(f"Frontend: serving from {FRONTEND_DIR}")
+    uvicorn.run(app, host="0.0.0.0", port=port)

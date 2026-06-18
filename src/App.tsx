@@ -65,14 +65,13 @@ const App: React.FC = () => {
     });
   }, [setLayers, clearChat]);
 
-  // 登录后触发 resize
+  // 登录后触发 resize，多级延迟确保移动端 display:none→flex 后地图正确渲染
   const prevUserRef = useRef(user);
   useEffect(() => {
     if (!prevUserRef.current && user) {
-      const timer = setTimeout(() => {
-        window.dispatchEvent(new Event('resize'));
-      }, 150);
-      return () => clearTimeout(timer);
+      [100, 300, 600].forEach(ms => {
+        setTimeout(() => window.dispatchEvent(new Event('resize')), ms);
+      });
     }
     prevUserRef.current = user;
   }, [user]);
