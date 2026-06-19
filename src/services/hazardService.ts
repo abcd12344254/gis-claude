@@ -7,7 +7,7 @@
 
 import maplibregl from 'maplibre-gl';
 import * as turf from '@turf/turf';
-import type { FeatureCollection, Feature, Point } from 'geojson';
+import type { FeatureCollection, Feature, Point, MultiLineString, LineString } from 'geojson';
 
 const USGS_API = 'https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson';
 
@@ -198,6 +198,7 @@ export function generateElevationLabels(
 
 /**
  * 从高程采样点生成等高线（turf.isolines）
+ * 注意: turf.isolines 要求点阵是均匀网格，不能有空缺
  */
 export function generateContours(
   grid: { lng: number; lat: number; elevation: number | null }[],
@@ -206,24 +207,58 @@ export function generateContours(
   const valid = grid.filter(p => p.elevation != null);
   if (valid.length < 4) return null;
 
-  // 构造点 FeatureCollection（供 turf.isolines 使用）
-  const points: FeatureCollection<Point> = {
-    type: 'FeatureCollection',
-    features: valid.map(p => ({
-      type: 'Feature' as const,
-      geometry: { type: 'Point' as const, coordinates: [p.lng, p.lat] },
-      properties: { elevation: Math.round(p.elevation!) },
-    })),
-  };
-
   // 计算等高线分级
-  const min = Math.min(...valid.map(p => p.elevation!));
-  const max = Math.max(...valid.map(p => p.elevation!));
+  const elevations = valid.map(p => p.elevation!);
+  const min = Math.min(...elevations);
+  const max = Math.max(...elevations);
   const breaks: number[] = [];
   for (let v = Math.ceil(min / interval) * interval; v <= max; v += interval) {
     breaks.push(v);
   }
   if (breaks.length === 0) return null;
+
+  // 去掉 null 后重建均匀网格：取非空点的最小外接矩形，重新插值
+  // 为满足 turf.isolines 的均匀网格要求，从这里获取有效点的经纬度范围
+  const lngs = valid.map(p => p.lng);
+  const lats = valid.map(p => p.lat);
+  const [w, e] = [Math.min(...lngs), Math.max(...lngs)];
+  const [s, n] = [Math.min(...lats), Math.max(...lats)];
+
+  // 用 ~20x20 的均匀网格保证 isolines 能工作
+  const GRID_SIZE = 20;
+  const lngStep = (e - w) / GRID_SIZE;
+  const latStep = (n - s) / GRID_SIZE;
+
+  // 用 IDW（反距离加权）插值出均匀网格
+  const uniformGrid: Feature<Point>[] = [];
+  for (let i = 0; i <= GRID_SIZE; i++) {
+    for (let j = 0; j <= GRID_SIZE; j++) {
+      const lng = w + i * lngStep;
+      const lat = s + j * latStep;
+      // IDW 插值：取最近的 valid 点加权平均
+      let weightSum = 0;
+      let elevSum = 0;
+      for (const vp of valid) {
+        const dx = lng - vp.lng;
+        const dy = lat - vp.lat;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const weight = dist < 1e-10 ? 1e10 : 1 / (dist * dist);
+        elevSum += vp.elevation! * weight;
+        weightSum += weight;
+      }
+      const elev = weightSum > 0 ? elevSum / weightSum : 0;
+      uniformGrid.push({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [lng, lat] },
+        properties: { elevation: Math.round(elev) },
+      });
+    }
+  }
+
+  const points: FeatureCollection<Point> = {
+    type: 'FeatureCollection',
+    features: uniformGrid,
+  };
 
   try {
     const contours = turf.isolines(points, breaks, { zProperty: 'elevation' });
