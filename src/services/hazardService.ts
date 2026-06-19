@@ -6,6 +6,7 @@
  */
 
 import maplibregl from 'maplibre-gl';
+import * as turf from '@turf/turf';
 import type { FeatureCollection, Feature, Point } from 'geojson';
 
 const USGS_API = 'https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson';
@@ -193,6 +194,53 @@ export function generateElevationLabels(
         properties: { name: `▼${Math.round(min.elevation)}m`, elevation: Math.round(min.elevation), _elevationLabel: 'valley' } },
     ],
   };
+}
+
+/**
+ * 从高程采样点生成等高线（turf.isolines）
+ */
+export function generateContours(
+  grid: { lng: number; lat: number; elevation: number | null }[],
+  interval: number = 100
+): FeatureCollection | null {
+  const valid = grid.filter(p => p.elevation != null);
+  if (valid.length < 4) return null;
+
+  // 构造点 FeatureCollection（供 turf.isolines 使用）
+  const points: FeatureCollection<Point> = {
+    type: 'FeatureCollection',
+    features: valid.map(p => ({
+      type: 'Feature' as const,
+      geometry: { type: 'Point' as const, coordinates: [p.lng, p.lat] },
+      properties: { elevation: Math.round(p.elevation!) },
+    })),
+  };
+
+  // 计算等高线分级
+  const min = Math.min(...valid.map(p => p.elevation!));
+  const max = Math.max(...valid.map(p => p.elevation!));
+  const breaks: number[] = [];
+  for (let v = Math.ceil(min / interval) * interval; v <= max; v += interval) {
+    breaks.push(v);
+  }
+  if (breaks.length === 0) return null;
+
+  try {
+    const contours = turf.isolines(points, breaks, { zProperty: 'elevation' });
+    if (!contours || !contours.features?.length) return null;
+
+    // 给每条等高线标注高程
+    contours.features.forEach((f: any) => {
+      if (f.properties) {
+        f.properties._contourElevation = f.properties.elevation;
+        f.properties.name = `${f.properties.elevation}m`;
+      }
+    });
+
+    return contours;
+  } catch {
+    return null;
+  }
 }
 
 /** 高程→颜色映射 */
