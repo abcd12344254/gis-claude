@@ -1117,7 +1117,7 @@ async function executeHazardCommand(cmd: HazardCommand): Promise<{
             features: demFeatures,
           };
 
-          // 触发浏览器下载
+          // ⑥ 触发 GeoJSON 下载
           const blob = new Blob([JSON.stringify(demGeoJSON, null, 2)], { type: 'application/geo+json' });
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
@@ -1128,8 +1128,27 @@ async function executeHazardCommand(cmd: HazardCommand): Promise<{
           document.body.removeChild(a);
           URL.revokeObjectURL(url);
 
+          // ⑦ 触发 GeoTIFF 下载（异步，不阻塞）
+          fetch('/api/dem/geotiff', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: placeName, grid: grid }),
+          }).then(async (res) => {
+            if (res.ok) {
+              const tifBlob = await res.blob();
+              const tifUrl = URL.createObjectURL(tifBlob);
+              const a2 = document.createElement('a');
+              a2.href = tifUrl;
+              a2.download = `${placeName}_DEM_${demInterval}m.tif`;
+              document.body.appendChild(a2);
+              a2.click();
+              document.body.removeChild(a2);
+              URL.revokeObjectURL(tifUrl);
+            }
+          }).catch(() => {});
+
           resolve({
-            description: `🏔️ ${placeName} DEM数据完成：${contourCount} 条等高线 (间距${demInterval}m)，海拔 ${min}m ~ ${max}m\n📥 GeoJSON 已自动下载到本地`,
+            description: `🏔️ ${placeName} DEM数据完成：${contourCount} 条等高线 (间距${demInterval}m)，海拔 ${min}m ~ ${max}m\n📥 GeoJSON + GeoTIFF 已自动下载到本地`,
             geojson: contours || labels,
           });
         };

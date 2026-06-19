@@ -900,6 +900,80 @@ async def gaode_poi_search(
         raise HTTPException(status_code=502, detail=f"高德POI搜索失败: {str(e)}")
 
 
+# ====== GeoTIFF DEM 导出 ======
+
+
+class DEMExportRequest(BaseModel):
+    grid: list[dict]  # [{lng, lat, elevation}, ...]
+    name: str = "DEM"
+
+
+@app.post("/api/dem/geotiff")
+async def dem_export_geotiff(req: DEMExportRequest):
+    """将高程采样网格导出为 GeoTIFF 文件"""
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_bounds
+    import io
+
+    valid = [p for p in req.grid if p.get("elevation") is not None]
+    if len(valid) < 4:
+        raise HTTPException(status_code=400, detail="有效高程点不足（至少需要4个）")
+
+    lngs = [p["lng"] for p in valid]
+    lats = [p["lat"] for p in valid]
+    elevs = [p["elevation"] for p in valid]
+
+    w, e = min(lngs), max(lngs)
+    s, n = min(lats), max(lats)
+
+    # 推断网格分辨率
+    grid_size = int(len(valid) ** 0.5)
+    if grid_size < 2:
+        raise HTTPException(status_code=400, detail="无法推断网格尺寸")
+
+    # IDW 插值到均匀网格
+    lng_step = (e - w) / grid_size
+    lat_step = (n - s) / grid_size
+    data = np.zeros((grid_size, grid_size), dtype=np.float32)
+
+    for i in range(grid_size):
+        for j in range(grid_size):
+            lng = w + (i + 0.5) * lng_step
+            lat = s + (j + 0.5) * lat_step
+            weight_sum = 0.0
+            elev_sum = 0.0
+            for vp in valid:
+                dx = lng - vp["lng"]
+                dy = lat - vp["lat"]
+                dist = (dx * dx + dy * dy) ** 0.5
+                weight = 1e10 if dist < 1e-10 else 1.0 / (dist * dist)
+                elev_sum += vp["elevation"] * weight
+                weight_sum += weight
+            data[j, i] = elev_sum / weight_sum if weight_sum > 0 else 0.0
+
+    transform = from_bounds(w, s, e, n, grid_size, grid_size)
+
+    buf = io.BytesIO()
+    with rasterio.open(
+        buf, "w", driver="GTiff",
+        height=grid_size, width=grid_size,
+        count=1, dtype="float32",
+        crs="EPSG:4326", transform=transform,
+        compress="lzw",
+    ) as dst:
+        dst.write(data, 1)
+    buf.seek(0)
+
+    filename = f"{req.name}_DEM.tif"
+    from fastapi.responses import Response
+    return Response(
+        content=buf.getvalue(),
+        media_type="image/tiff",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 # ====== 前端静态文件（生产环境部署用） ======
 
 FRONTEND_DIR = Path(__file__).parent.parent / "dist"
