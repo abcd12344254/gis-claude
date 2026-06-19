@@ -37,6 +37,7 @@ import {
   geocodeSearch,
 } from '../services/osmService';
 import type { OSMCommand, OSMQueryResult } from '../services/osmService';
+import { gaodeGeocode } from '../services/gaodeService';
 import {
   bufferAnalysis,
   calculateArea,
@@ -227,12 +228,15 @@ const GEOJSON_INSTRUCTION = `
 \`\`\`
 [HAZARD:earthquake:4.0]   — 查询当前视野 M≥4.0 地震（近90天）
 [HAZARD:earthquake]       — 查询当前视野 M≥3.0 地震
-[HAZARD:elevation:100]    — 生成等高线（等高距 100m，需先开3D地形）
-[HAZARD:elevation]        — 生成等高线（默认等高距 100m）
+[HAZARD:elevation:100]    — 生成当前视野等高线（等高距 100m，需先开3D地形）
+[HAZARD:elevation]        — 生成当前视野等高线（默认等高距 100m）
+[HAZARD:dem:天津市]        — 生成指定地区的DEM数据（自动定位+3D+等高线+极值）
+[HAZARD:dem:武汉市:50]     — 生成指定地区DEM数据（等高距 50m）
 [HAZARD:weather]          — 查询当前视野实时气象+7天预报
 \`\`\`
 当用户提到"地震"、"地震带"、"最近地震"、"地质灾害"时，生成 earthquake 指令。
-当用户提到"等高线"、"地形"、"海拔"、"高程"时，生成 elevation 指令。先开3D地形。
+当用户提到"等高线"、"地形"、"海拔"、"高程"时，是当前视野则生成 elevation 指令。
+当用户指定了具体地区如"生成天津市DEM"、"武汉市DEM数据"、"北京地形"时，生成 dem 指令（自动定位该地区+开启3D+生成等高线）。先开3D地形。
 当用户提到"天气"、"气温"、"下雨"、"刮风"、"降雨"时，生成 weather 指令。
 
 ### ⚠️ 绝对规则 —— 违反将导致查询失败！
@@ -896,7 +900,7 @@ function parseRouteCommands(text: string): RouteCommand[] {
 // ====== HAZARD 灾害数据指令 ======
 
 interface HazardCommand {
-  type: 'earthquake' | 'elevation' | 'weather';
+  type: 'earthquake' | 'elevation' | 'dem' | 'weather';
   param?: string;
 }
 
@@ -1003,6 +1007,138 @@ async function executeHazardCommand(cmd: HazardCommand): Promise<{
           window.removeEventListener('elevation-grid-result', handler);
           resolve({ description: '⚠️ 高程采样超时，请确认3D地形已加载', geojson: null });
         }, 5000);
+      });
+    }
+    case 'dem': {
+      // cmd.param 格式: "天津市" 或 "天津市:50"（地名:等高距）
+      const demParam = cmd.param || '';
+      const colonIdx = demParam.lastIndexOf(':');
+      const placeName = colonIdx >= 0 ? demParam.substring(0, colonIdx) : demParam;
+      const demInterval = colonIdx >= 0 ? Number(demParam.substring(colonIdx + 1)) : 100;
+
+      if (!placeName) {
+        return { description: '❌ 请指定地区名称，如"天津市"、"武汉市"', geojson: null };
+      }
+
+      // ① 地理编码：地名 → 坐标
+      const gaode = await gaodeGeocode(placeName);
+      if (!gaode.geojson || gaode.geojson.features.length === 0) {
+        return { description: `❌ 未找到"${placeName}"的地理位置，请确认地名是否正确`, geojson: null };
+      }
+      const geom: any = gaode.geojson.features[0].geometry;
+      const coords = geom?.coordinates as [number, number] | undefined;
+      if (!coords || coords.length < 2) {
+        return { description: `❌ 无法解析"${placeName}"的坐标`, geojson: null };
+      }
+
+      // ② 飞行到目标区域 + 开启 3D
+      const targetZoom = 11;
+      store.setMapState({ center: coords, zoom: targetZoom });
+      window.dispatchEvent(new CustomEvent('fly-to', { detail: { center: coords, zoom: targetZoom } }));
+
+      // 等 map 飞完
+      await new Promise(r => setTimeout(r, 1500));
+
+      // ③ 开启 3D 地形
+      if (!useGISStore.getState().terrain3dEnabled) {
+        window.dispatchEvent(new CustomEvent('toggle-3d-terrain', { detail: { enabled: true } }));
+        await new Promise(r => setTimeout(r, 4000));
+        if (!useGISStore.getState().terrain3dEnabled) {
+          return { description: '⚠️ 3D地形开启失败，请手动点击顶部工具栏的3D按钮后重试', geojson: null };
+        }
+      }
+
+      // ④ 获取当前视野 bounds
+      const demBounds: [number, number, number, number] =
+        bounds && bounds[2] - bounds[0] > 0
+          ? [bounds[0], bounds[1], bounds[2], bounds[3]]
+          : [coords[0] - 0.5, coords[1] - 0.3, coords[0] + 0.5, coords[1] + 0.3];
+
+      // ⑤ 采样高程网格
+      return new Promise((resolve) => {
+        const handler = (e: Event) => {
+          window.removeEventListener('elevation-grid-result', handler);
+          const grid = (e as CustomEvent).detail as { lng: number; lat: number; elevation: number | null }[] | null;
+          if (!grid || grid.length === 0) {
+            resolve({ description: '⚠️ DEM高程采样失败，请确认3D地形已加载', geojson: null });
+            return;
+          }
+          const contours = generateContours(grid, demInterval);
+          const labels = generateElevationLabels(grid);
+          const { addLayer } = useGISStore.getState();
+
+          if (contours && contours.features.length > 0) {
+            addLayer({
+              id: '', name: `${placeName}等高线 ${demInterval}m`,
+              type: 'geojson', visible: true,
+              color: '#8B4513', opacity: 0.7,
+              data: contours,
+              sourceId: '', layerId: '', createdAt: Date.now(),
+            });
+          }
+          if (labels) {
+            addLayer({
+              id: '', name: `${placeName}极值点`,
+              type: 'point', visible: true,
+              color: '#ff0000', opacity: 1,
+              data: labels,
+              sourceId: '', layerId: '', createdAt: Date.now(),
+            });
+          }
+
+          const elevs = grid.filter(p => p.elevation != null).map(p => p.elevation!) as number[];
+          const min = Math.round(Math.min(...elevs));
+          const max = Math.round(Math.max(...elevs));
+          const contourCount = contours?.features?.length || 0;
+
+          // ⑥ 组装完整 DEM GeoJSON 并自动下载
+          const demFeatures: any[] = [];
+          // 等高线
+          if (contours) demFeatures.push(...contours.features);
+          // 极值标注
+          if (labels) demFeatures.push(...labels.features.map(f => ({ ...f, properties: { ...f.properties, _type: 'peak_or_valley' } })));
+          // 高程采样网格点
+          grid.filter(p => p.elevation != null).forEach(p => {
+            demFeatures.push({
+              type: 'Feature',
+              geometry: { type: 'Point', coordinates: [p.lng, p.lat] },
+              properties: { elevation: Math.round(p.elevation!), _type: 'sample' },
+            });
+          });
+
+          const demGeoJSON = {
+            type: 'FeatureCollection',
+            properties: {
+              name: `${placeName} DEM数据`,
+              interval: demInterval,
+              elevationRange: [min, max],
+              generated: new Date().toISOString(),
+            },
+            features: demFeatures,
+          };
+
+          // 触发浏览器下载
+          const blob = new Blob([JSON.stringify(demGeoJSON, null, 2)], { type: 'application/geo+json' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `${placeName}_DEM_${demInterval}m.geojson`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+
+          resolve({
+            description: `🏔️ ${placeName} DEM数据完成：${contourCount} 条等高线 (间距${demInterval}m)，海拔 ${min}m ~ ${max}m\n📥 GeoJSON 已自动下载到本地`,
+            geojson: contours || labels,
+          });
+        };
+        window.addEventListener('elevation-grid-result', handler);
+        window.dispatchEvent(new CustomEvent('query-elevation-grid', { detail: { resolution: 40 } }));
+        setTimeout(() => {
+          window.removeEventListener('elevation-grid-result', handler);
+          resolve({ description: '⚠️ DEM采样超时，请确认3D地形已加载', geojson: null });
+        }, 8000);
       });
     }
     case 'weather': {
