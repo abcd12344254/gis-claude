@@ -27,6 +27,7 @@ import {
   CopyOutlined,
 } from '@ant-design/icons';
 import { useGISStore } from '../store/useGISStore';
+import { useIsMobile } from '../hooks/useIsMobile';
 import type { FeatureCollection } from 'geojson';
 import { getFCBounds } from '../utils/geo';
 import { applyClassification, COLOR_RAMPS, findNumericFields } from '../services/classification';
@@ -46,6 +47,8 @@ const LayerPanel: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { layers, toggleLayerVisibility, removeLayer, updateLayer, addLayer } =
     useGISStore();
+
+  const isMobile = useIsMobile();
 
   // 分类着色状态
   const [classifyLayerId, setClassifyLayerId] = useState<string | null>(null);
@@ -258,7 +261,7 @@ const LayerPanel: React.FC = () => {
           />
           <Tooltip title="加载 GeoJSON 或 CSV 点位">
             <Button
-              size="small"
+              size={isMobile ? 'middle' : 'small'}
               icon={<UploadOutlined />}
               onClick={() => fileInputRef.current?.click()}
             />
@@ -280,7 +283,7 @@ const LayerPanel: React.FC = () => {
             <List.Item
               className="layer-item"
               style={{
-                padding: '8px',
+                padding: isMobile ? '10px 8px' : '8px',
                 cursor: 'pointer',
                 borderRadius: 6,
               }}
@@ -297,7 +300,7 @@ const LayerPanel: React.FC = () => {
                 {/* Visibility toggle */}
                 <Button
                   type="text"
-                  size="small"
+                  size={isMobile ? 'middle' : 'small'}
                   icon={
                     layer.visible ? (
                       <EyeOutlined />
@@ -339,7 +342,7 @@ const LayerPanel: React.FC = () => {
                 {/* Color picker */}
                 <div onClick={(e) => e.stopPropagation()}>
                   <ColorPicker
-                    size="small"
+                    size={isMobile ? 'middle' : 'small'}
                     value={layer.color}
                     onChange={(color) =>
                       updateLayer(layer.id, { color: color.toHexString() })
@@ -348,7 +351,7 @@ const LayerPanel: React.FC = () => {
                 </div>
 
                 {/* Opacity slider */}
-                <div style={{ width: 40 }} onClick={(e) => e.stopPropagation()}>
+                <div style={{ width: isMobile ? 60 : 40 }} onClick={(e) => e.stopPropagation()}>
                   <Slider
                     min={0}
                     max={1}
@@ -366,7 +369,7 @@ const LayerPanel: React.FC = () => {
                 <Dropdown menu={{ items: contextMenuItems(layer.id) }}>
                   <Button
                     type="text"
-                    size="small"
+                    size={isMobile ? 'middle' : 'small'}
                     icon={<MoreOutlined />}
                     onClick={(e) => e.stopPropagation()}
                   />
@@ -385,7 +388,7 @@ const LayerPanel: React.FC = () => {
                 >
                   <Button
                     type="text"
-                    size="small"
+                    size={isMobile ? 'middle' : 'small'}
                     danger
                     icon={<DeleteOutlined />}
                     onClick={(e) => e.stopPropagation()}
@@ -404,7 +407,7 @@ const LayerPanel: React.FC = () => {
 
           {/* 图层选择 */}
           <Select
-            size="small"
+            size={isMobile ? 'middle' : 'small'}
             placeholder="选择要着色的图层..."
             style={{ width: '100%', marginBottom: 6 }}
             value={classifyLayerId}
@@ -417,7 +420,7 @@ const LayerPanel: React.FC = () => {
           {/* 字段选择 */}
           {numFields.length > 0 && (
             <Select
-              size="small"
+              size={isMobile ? 'middle' : 'small'}
               placeholder={`选择数值字段（${numFields.length} 个可用）…`}
               style={{ width: '100%', marginBottom: 6 }}
               value={classifyField}
@@ -451,11 +454,11 @@ const LayerPanel: React.FC = () => {
           {/* 操作按钮 */}
           {classifyField && (
             <div style={{ display: 'flex', gap: 6 }}>
-              <Button size="small" type="primary" onClick={handleApplyClassify} block>
+              <Button size={isMobile ? 'middle' : 'small'} type="primary" onClick={handleApplyClassify} block={!isMobile}>
                 应用着色
               </Button>
               {classifyResult && (
-                <Button size="small" onClick={handleClearClassify}>清除</Button>
+                <Button size={isMobile ? 'middle' : 'small'} onClick={handleClearClassify}>清除</Button>
               )}
             </div>
           )}

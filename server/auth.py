@@ -198,3 +198,47 @@ async def get_current_user(authorization: str | None = Header(None)) -> dict:
     if not user:
         raise HTTPException(status_code=401, detail="用户不存在")
     return user
+
+
+ADMIN_EMAILS = os.getenv("ADMIN_EMAILS", "").split(",")  # 逗号分隔的管理员邮箱列表
+
+
+def is_admin(user: dict) -> bool:
+    """检查用户是否为管理员（id=1 或邮箱在 ADMIN_EMAILS 中）"""
+    if user.get("id") == 1:
+        return True
+    if user.get("email", "").strip() in [e.strip() for e in ADMIN_EMAILS if e.strip()]:
+        return True
+    return False
+
+
+async def get_admin_user(authorization: str | None = Header(None)) -> dict:
+    """管理员权限校验"""
+    user = await get_current_user(authorization)
+    if not is_admin(user):
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    return user
+
+
+def list_all_users() -> list[dict]:
+    """管理员：列出所有注册用户"""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT id, email, plan, quota_daily, quota_used_today, quota_date, verified, created_at "
+        "FROM users ORDER BY id DESC"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_user_stats() -> dict:
+    """管理员：用户统计"""
+    conn = _get_conn()
+    total = conn.execute("SELECT COUNT(*) as c FROM users").fetchone()["c"]
+    verified = conn.execute("SELECT COUNT(*) as c FROM users WHERE verified = 1").fetchone()["c"]
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today_new = conn.execute(
+        "SELECT COUNT(*) as c FROM users WHERE date(created_at) = ?", (today,)
+    ).fetchone()["c"]
+    conn.close()
+    return {"total": total, "verified": verified, "today_new": today_new}

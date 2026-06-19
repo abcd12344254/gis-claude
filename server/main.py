@@ -14,18 +14,23 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import httpx
 from dotenv import load_dotenv
+load_dotenv(dotenv_path=Path(__file__).parent / ".env")  # 必须在 auth 导入之前加载，否则 ADMIN_EMAILS 为空
 from auth import (
     init_db,
     create_user,
     authenticate_user,
     create_access_token,
     get_current_user,
+    get_admin_user,
     reset_daily_quota_if_needed,
     increment_quota,
     verify_token,
     get_user_by_id,
     verify_user_email,
     get_user_by_email,
+    list_all_users,
+    get_user_stats,
+    is_admin,
     UserRegister,
     UserLogin,
     UserInfo,
@@ -41,8 +46,6 @@ from projects import (
     save_layers,
     load_layers,
 )
-
-load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
 # ====== Lifespan ======
 
@@ -150,13 +153,17 @@ async def health_check():
 @app.post("/api/auth/register")
 async def auth_register(req: UserRegister):
     """注册新用户"""
+    print(f"[REGISTER] 收到注册请求: email={req.email}, password_len={len(req.password)}", flush=True)
     try:
         user = create_user(req.email, req.password)
+        print(f"[REGISTER] 注册成功: id={user['id']}, email={user['email']}", flush=True)
         token = create_access_token(user["id"], user["email"])
-        return {"token": token, "user": {"id": user["id"], "email": user["email"], "plan": user["plan"], "verified": user.get("verified", 0)}}
+        return {"token": token, "user": {"id": user["id"], "email": user["email"], "plan": user["plan"], "verified": user.get("verified", 0), "is_admin": is_admin(user)}}
     except HTTPException:
+        print(f"[REGISTER] 注册失败(HTTPException): {req.email}", flush=True)
         raise
     except Exception as e:
+        print(f"[REGISTER] 注册失败(Exception): {req.email}, error={e}", flush=True)
         raise HTTPException(status_code=500, detail=f"注册失败: {str(e)}")
 
 
@@ -167,7 +174,7 @@ async def auth_login(req: UserLogin):
     if not user:
         raise HTTPException(status_code=401, detail="邮箱或密码错误")
     token = create_access_token(user["id"], user["email"])
-    return {"token": token, "user": {"id": user["id"], "email": user["email"], "plan": user["plan"], "verified": user.get("verified", 0)}}
+    return {"token": token, "user": {"id": user["id"], "email": user["email"], "plan": user["plan"], "verified": user.get("verified", 0), "is_admin": is_admin(user)}}
 
 
 class SendCodeRequest(BaseModel):
@@ -217,7 +224,38 @@ async def auth_me(user: dict = Depends(get_current_user)):
         "plan": user["plan"],
         "quota_daily": user["quota_daily"],
         "quota_remaining": remaining,
+        "is_admin": is_admin(user),
     }
+
+
+# ====== 管理员接口 ======
+
+
+@app.get("/api/admin/users")
+async def admin_list_users(admin: dict = Depends(get_admin_user)):
+    """管理员：列出所有注册用户"""
+    users = list_all_users()
+    stats = get_user_stats()
+    return {"users": users, "stats": stats}
+
+
+@app.get("/api/admin/users/export")
+async def admin_export_users(admin: dict = Depends(get_admin_user)):
+    """管理员：导出用户 CSV"""
+    import io
+    users = list_all_users()
+    output = io.StringIO()
+    output.write("id,email,plan,verified,quota_daily,quota_used_today,created_at\n")
+    for u in users:
+        output.write(f'{u["id"]},{u["email"]},{u["plan"]},{u["verified"]},{u["quota_daily"]},{u["quota_used_today"]},"{u["created_at"]}"\n')
+    csv_content = output.getvalue()
+    output.close()
+    from fastapi.responses import Response
+    return Response(
+        content=csv_content.encode("utf-8-sig"),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=users_export.csv"},
+    )
 
 
 # ====== Projects ======
@@ -789,7 +827,7 @@ async def gaode_geocode(
     city: str = Query("", description="城市（可选，限定搜索范围）"),
     location: str = Query("", description="坐标 lng,lat（可选，后端自动反查城市来限定范围）"),
 ):
-    """高德地理编码：地名 → 坐标（GCJ-02 → WGS-84）"""
+    """高德地理编码：地名 → 坐标（GCJ-02，与高德底图对齐）"""
     if not GAODE_API_KEY:
         raise HTTPException(status_code=501, detail="GAODE_API_KEY not configured")
 
@@ -804,14 +842,7 @@ async def gaode_geocode(
             resp = await client.get(GAODE_GEOCODE_URL, params=params)
             resp.raise_for_status()
             data = resp.json()
-            if data.get("status") == "1" and data.get("geocodes"):
-                for geo in data["geocodes"]:
-                    location = geo.get("location", "")
-                    if location:
-                        gcj_lng, gcj_lat = map(float, location.split(","))
-                        wgs_lng, wgs_lat = gcj02_to_wgs84(gcj_lng, gcj_lat)
-                        geo["wgs84_location"] = f"{wgs_lng},{wgs_lat}"
-                return data
+            # 底图已换高德(GCJ-02)，数据保留 GCJ-02 以对齐底图
             return data
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"高德地理编码失败: {str(e)}")
@@ -863,14 +894,7 @@ async def gaode_poi_search(
             resp = await client.get(GAODE_POI_URL, params=params)
             resp.raise_for_status()
             data = resp.json()
-            # 转换坐标
-            if data.get("status") == "1" and data.get("pois"):
-                for poi in data["pois"]:
-                    location = poi.get("location", "")
-                    if location:
-                        gcj_lng, gcj_lat = map(float, location.split(","))
-                        wgs_lng, wgs_lat = gcj02_to_wgs84(gcj_lng, gcj_lat)
-                        poi["wgs84_location"] = f"{wgs_lng},{wgs_lat}"
+            # 底图已换高德(GCJ-02)，数据保留 GCJ-02 以对齐底图
             return data
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"高德POI搜索失败: {str(e)}")

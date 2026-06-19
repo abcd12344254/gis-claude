@@ -14,6 +14,7 @@ import {
   DeleteOutlined,
 } from '@ant-design/icons';
 import { useGISStore } from '../store/useGISStore';
+import { useIsMobile } from '../hooks/useIsMobile';
 
 const CITIES: { name: string; center: [number, number]; zoom: number }[] = [
   { name: '北京', center: [116.397, 39.909], zoom: 11 },
@@ -29,6 +30,16 @@ const CITIES: { name: string; center: [number, number]; zoom: number }[] = [
 ];
 
 const BASE_MAPS: { name: string; url: string; attribution: string }[] = [
+  {
+    name: '高德地图',
+    url: 'https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',
+    attribution: '© 高德地图 AutoNavi',
+  },
+  {
+    name: '高德卫星图',
+    url: 'https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
+    attribution: '© 高德地图 AutoNavi',
+  },
   {
     name: 'OpenStreetMap',
     url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
@@ -69,6 +80,8 @@ const Toolbar: React.FC = () => {
     removeBookmark,
     layers,
   } = useGISStore();
+
+  const isMobile = useIsMobile();
 
   const [bmModalOpen, setBmModalOpen] = useState(false);
   const [bmName, setBmName] = useState('');
@@ -149,31 +162,33 @@ const Toolbar: React.FC = () => {
         onClick: () => handleRestoreBookmark(bm.id),
       }));
 
+  const btnSize = isMobile ? 'middle' : 'small' as const;
+
   return (
     <Space size="small" wrap>
       <Dropdown menu={{ items: cityItems }}>
-        <Button size="small" icon={<GlobalOutlined />}>
-          城市
+        <Button size={btnSize} icon={<GlobalOutlined />}>
+          {isMobile ? '' : '城市'}
         </Button>
       </Dropdown>
 
       <Dropdown menu={{ items: baseMapItems, onClick: handleBaseMapChange }}>
-        <Button size="small" icon={<EnvironmentOutlined />}>
-          底图
+        <Button size={btnSize} icon={<EnvironmentOutlined />}>
+          {isMobile ? '' : '底图'}
         </Button>
       </Dropdown>
 
       <Tooltip title="放大">
-        <Button size="small" icon={<ExpandOutlined />} onClick={handleZoomIn} />
+        <Button size={btnSize} icon={<ExpandOutlined />} onClick={handleZoomIn} />
       </Tooltip>
 
       <Tooltip title="缩小">
-        <Button size="small" icon={<CompressOutlined />} onClick={handleZoomOut} />
+        <Button size={btnSize} icon={<CompressOutlined />} onClick={handleZoomOut} />
       </Tooltip>
 
       <Tooltip title="回到初始视图">
         <Button
-          size="small"
+          size={btnSize}
           icon={<AimOutlined />}
           onClick={() => handleFlyTo([116.397, 39.909], 11)}
         />
@@ -181,7 +196,7 @@ const Toolbar: React.FC = () => {
 
       <Tooltip title={measurementActive ? '测量中...双击结束' : '测量工具'}>
         <Button
-          size="small"
+          size={btnSize}
           icon={<SearchOutlined />}
           type={measurementActive ? 'primary' : 'default'}
           onClick={() => {
@@ -195,7 +210,7 @@ const Toolbar: React.FC = () => {
 
       <Tooltip title={terrain3dEnabled ? '切换2D平面视图' : '切换3D地形视图'}>
         <Button
-          size="small"
+          size={btnSize}
           icon={<BlockOutlined />}
           type={terrain3dEnabled ? 'primary' : 'default'}
           onClick={() => {
@@ -211,12 +226,12 @@ const Toolbar: React.FC = () => {
 
       <Dropdown menu={{ items: bookmarkItems }}>
         <Tooltip title="书签视图">
-          <Button size="small" icon={<StarOutlined />} />
+          <Button size={btnSize} icon={<StarOutlined />} />
         </Tooltip>
       </Dropdown>
       <Tooltip title="保存当前视图">
         <Button
-          size="small"
+          size={btnSize}
           icon={<StarFilled />}
           onClick={() => {
             setBmName('');

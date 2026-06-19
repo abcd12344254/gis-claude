@@ -4,6 +4,7 @@ import type { SpatialAnalysisResult, MeasurementResult } from '../types';
 
 /**
  * 执行缓冲区分析（支持 Polygon、MultiPolygon、LineString、Point）
+ * 性能优化：对大几何体预简化以减少 turf.buffer 计算量
  */
 export function bufferAnalysis(
   featureCollection: FeatureCollection,
@@ -13,7 +14,7 @@ export function bufferAnalysis(
   try {
     const BUFFERABLE_TYPES = ['Polygon', 'MultiPolygon', 'LineString', 'MultiLineString', 'Point', 'MultiPoint'];
 
-    // 1. 只保留可缓冲的几何要素
+    // 1. 只保留可缓冲的几何要素，并对复杂几何体预简化
     const validFeatures = featureCollection.features.filter(f => {
       const t = f.geometry?.type;
       return BUFFERABLE_TYPES.includes(t || '') && f.geometry;
@@ -24,17 +25,21 @@ export function bufferAnalysis(
       return { type: 'buffer', result: null, description: `❌ 无可缓冲要素(图层类型:${types.join(',')})。支持: Polygon/LineString/Point` };
     }
 
-    // 2. 逐个Feature独立缓冲（最稳定方式），然后合并
+    // 2. 逐个Feature独立缓冲，对大几何体预简化加速
     const bufferedFeatures: Feature[] = [];
     let failedCount = 0;
     for (const f of validFeatures) {
       try {
-        // 手动构建纯净Geometry，避免Turf内部类型检查报错
         const geom: any = f.geometry!;
-        const cleanGeom: any = {
-          type: geom.type,
-          coordinates: geom.coordinates,
-        };
+        // 对高顶点数几何体先简化，大幅加速 turf.buffer
+        let coords = geom.coordinates;
+        const vertexCount = countVertices(coords);
+        const simplifiedGeom = vertexCount > 500
+          ? turf.simplify({ type: 'Feature', geometry: geom, properties: {} } as any, { tolerance: 0.0005, highQuality: false })
+          : null;
+        const cleanGeom: any = simplifiedGeom?.geometry
+          ? { type: simplifiedGeom.geometry.type, coordinates: simplifiedGeom.geometry.coordinates }
+          : { type: geom.type, coordinates: coords };
         const cleanFeature: Feature = { type: 'Feature', geometry: cleanGeom, properties: {} };
         const result = turf.buffer(cleanFeature, radius, { units });
         if (result?.geometry) {
@@ -49,7 +54,7 @@ export function bufferAnalysis(
       return { type: 'buffer', result: null, description: `❌ 未能生成任何缓冲区 (${failedCount}个要素均失败)` };
     }
 
-    // 3. 合并多个缓冲区，并附加描边线
+    // 3. 合并多个缓冲区
     let mergedFeature: Feature;
     if (bufferedFeatures.length === 1) {
       mergedFeature = bufferedFeatures[0];
@@ -61,23 +66,8 @@ export function bufferAnalysis(
       mergedFeature = m;
     }
 
-    // 从 Polygon 提取外环作为 LineString（确保线图层也能渲染）
-    const outlineFeatures: Feature[] = [mergedFeature];
-    const geom: any = mergedFeature.geometry;
-    if (geom) {
-      const rings: any[] = geom.type === 'Polygon' ? geom.coordinates : (geom.type === 'MultiPolygon' ? geom.coordinates.flat() : []);
-      for (const ring of rings) {
-        if (ring.length >= 2) {
-          outlineFeatures.push({
-            type: 'Feature',
-            geometry: { type: 'LineString', coordinates: ring },
-            properties: { _outline: true },
-          });
-        }
-      }
-    }
-
-    const finalResult: FeatureCollection = { type: 'FeatureCollection', features: outlineFeatures };
+    // 只返回多边形结果（不含多余的描边线），让 MapLibre fill-outline 自然绘制边界
+    const finalResult: FeatureCollection = { type: 'FeatureCollection', features: [mergedFeature] };
     const unitLabel = units === 'kilometers' ? '公里' : units === 'meters' ? '米' : '英里';
     const warnPart = failedCount > 0 ? ` (${failedCount}个要素失败)` : '';
     return { type: 'buffer', result: finalResult, description: `✅ 缓冲区完成：半径 ${radius} ${unitLabel}，${bufferedFeatures.length}个要素${warnPart}` };
@@ -85,6 +75,16 @@ export function bufferAnalysis(
     const msg = err instanceof Error ? err.message : '未知错误';
     return { type: 'buffer', result: null, description: `❌ 缓冲区失败：${msg}` };
   }
+}
+
+/** 递归统计坐标数组中的顶点数 */
+function countVertices(coords: any): number {
+  if (typeof coords[0] === 'number') return 1;
+  let count = 0;
+  for (const item of coords) {
+    count += countVertices(item);
+  }
+  return count;
 }
 
 /**

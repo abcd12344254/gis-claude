@@ -8,15 +8,16 @@ import { measureDistance, measureArea } from '../services/spatialAnalysis';
 import { sampleElevationGrid } from '../services/hazardService';
 
 const TERRAIN_DEM_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
+const DEFAULT_TILE_URL = 'https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}';
 
 const MAP_STYLE: maplibregl.StyleSpecification = {
   version: 8,
   sources: {
     'osm-tiles': {
       type: 'raster',
-      tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+      tiles: [DEFAULT_TILE_URL],
       tileSize: 256,
-      attribution: '&copy; OpenStreetMap contributors',
+      attribution: '&copy; 高德地图 AutoNavi',
     },
     'terrain-dem': {
       type: 'raster-dem',
@@ -57,7 +58,7 @@ const MapView: React.FC = () => {
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const drawRef = useRef<maplibregl.Map | null>(null);
-  const prevBasemapUrl = useRef<string>('https://tile.openstreetmap.org/{z}/{x}/{y}.png');
+  const prevBasemapUrl = useRef<string>(DEFAULT_TILE_URL);
   // 追踪已渲染图层元信息，用于判断是否需要全量重建 vs 仅 toggle visibility
   const renderedLayersMeta = useRef<Map<string, string>>(new Map());
 
@@ -555,10 +556,15 @@ const MapView: React.FC = () => {
           }, 200);
         }
       });
+
+      // 强制触发重绘，确保新增/修改的图层立即显示
+      map.triggerRepaint();
     };
 
     if (map.loaded()) {
-      updateLayers();
+      // 延迟到下一帧执行，避免在 MapLibre 渲染周期中修改样式导致图层"隐形"
+      // （不触发绘制但需点击图层管理才会显示）
+      requestAnimationFrame(() => updateLayers());
     } else {
       map.once('load', updateLayers);
     }

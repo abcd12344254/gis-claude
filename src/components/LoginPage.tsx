@@ -78,6 +78,7 @@ const LoginPage: React.FC = () => {
   };
 
   const handleVerifyAndRegister = async (values: { code: string }) => {
+    if (loading) return;  // 防止重复点击导致 409
     setLoading(true);
     try {
       const verifyRes = await fetch('/api/auth/verify-email', {
@@ -86,8 +87,8 @@ const LoginPage: React.FC = () => {
         body: JSON.stringify({ email: registerEmail, code: values.code }),
       });
       if (!verifyRes.ok) {
-        const err = await verifyRes.json();
-        throw new Error(err.detail || '验证失败');
+        const err = await verifyRes.json().catch(() => ({}));
+        throw new Error(err.detail || `验证失败 (${verifyRes.status})`);
       }
 
       const regRes = await fetch('/api/auth/register', {
@@ -95,19 +96,27 @@ const LoginPage: React.FC = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: registerEmail, password: registerPassword }),
       });
-      const data = await regRes.json();
-      if (!regRes.ok) throw new Error(data.detail || '注册失败');
+      const data = await regRes.json().catch(() => ({}));
+      if (!regRes.ok) {
+        const detail = data.detail || `服务器错误 (${regRes.status})`;
+        console.error('[注册失败]', registerEmail, detail, data);
+        throw new Error(detail);
+      }
 
+      console.log('[注册成功]', registerEmail, data.user?.id);
       setAuth(data.token, data.user);
       message.success('注册成功！欢迎使用 GIS Claude');
     } catch (err) {
-      message.error(err instanceof Error ? err.message : '注册失败');
+      const msg = err instanceof Error ? err.message : '注册失败';
+      console.error('[注册异常]', registerEmail, msg);
+      message.error({ content: `注册失败：${msg}`, duration: 6 });
     } finally {
       setLoading(false);
     }
   };
 
   const handleLogin = async (values: { email: string; password: string }) => {
+    if (loading) return;  // 防止重复点击
     setLoading(true);
     try {
       const res = await fetch('/api/auth/login', {

@@ -14,7 +14,7 @@ const OVERPASS_URL = '/api/osm/overpass';
 
 /** 查询结果 */
 export interface OSMQueryResult {
-  type: 'boundary' | 'poi' | 'building' | 'road' | 'water' | 'green' | 'custom';
+  type: 'boundary' | 'poi' | 'building' | 'road' | 'water' | 'green' | 'custom' | 'outline';
   label: string;
   geojson: FeatureCollection | null;
   description: string;
@@ -1675,30 +1675,27 @@ export async function executeOSMCommand(
 
   switch (cmd.action) {
     case 'boundary': {
-      result = await queryBoundary(cmd.params);
-      // 行政区查不到时，回退到 feature 查询（Nominatim+OSM ID，更稳定）
-      if (!result.geojson || result.geojson.features.length === 0) {
-        result = await queryFeature(cmd.params);
-      }
-      // 兜底：OSM 无结果时用高德
-      if ((!result.geojson || result.geojson.features.length === 0) && !result.error) {
-        const gaode = await gaodeGeocode(cmd.params);
-        if (gaode.geojson && gaode.geojson.features.length > 0) {
-          result = { type: 'boundary', label: gaode.label, geojson: gaode.geojson, description: gaode.description };
-        }
-      }
-      // 🛡️ 校验：boundary 期望面状数据。纯点状结果（高德兜底）降级为坐标定位
-      if (result.geojson && result.geojson.features.length > 0) {
-        const POLYGON_TYPES = new Set(['Polygon', 'MultiPolygon']);
-        const hasPolygon = result.geojson.features.some(f => POLYGON_TYPES.has(f.geometry?.type || ''));
-        if (!hasPolygon) {
-          // 不拒绝，但降级标记：告诉用户这只是坐标点，不是真正的边界
-          result = {
-            ...result,
-            type: 'custom',
-            label: `${cmd.params} (坐标定位)`,
-            description: `⚠️ 未找到"${cmd.params}"的面状边界（Overpass不可用），已降级为坐标定位，分析结果可能不精确`,
-          };
+      // 高德 + OSM 并行查询：高德快但可能只有点，OSM 有面状边界
+      const gaodeFirst = await gaodeGeocode(cmd.params);
+      const gaodeHasPolygon = gaodeFirst.geojson
+        ? gaodeFirst.geojson.features.some((f: any) => f.geometry?.type === 'Polygon' || f.geometry?.type === 'MultiPolygon')
+        : false;
+
+      if (gaodeHasPolygon) {
+        // 高德返回面状数据，直接用
+        result = { type: 'boundary', label: gaodeFirst.label, geojson: gaodeFirst.geojson!, description: gaodeFirst.description };
+      } else {
+        // 高德只有点或无结果 → 并行取 OSM（面状自然地理/行政区）
+        const osmResult = await queryBoundary(cmd.params);
+        const osmOk = osmResult.geojson && osmResult.geojson.features.length > 0;
+        if (osmOk) {
+          result = osmResult;
+        } else if (gaodeFirst.geojson && gaodeFirst.geojson.features.length > 0) {
+          // OSM 失败，退而求其次用高德的点
+          result = { type: 'boundary', label: gaodeFirst.label, geojson: gaodeFirst.geojson, description: `⚠️ 仅坐标定位（未找到面状边界），可尝试缩小范围` };
+        } else {
+          // 都失败
+          result = await queryFeature(cmd.params);
         }
       }
       if (result.geojson) {
@@ -1718,13 +1715,23 @@ export async function executeOSMCommand(
 
     // ====== 通用地理要素（沙漠/山脉/湖泊/大学等） ======
     case 'feature': {
-      result = await queryFeature(cmd.params);
-      // OSM 无结果时用高德补偿（国内 POI 覆盖更好）
-      if ((!result.geojson || result.geojson.features.length === 0) && !result.error) {
-        const gaode = await gaodeGeocode(cmd.params);
-        if (gaode.geojson && gaode.geojson.features.length > 0) {
-          result = { type: 'custom', label: gaode.label, geojson: gaode.geojson, description: gaode.description };
+      const gaodeFirst = await gaodeGeocode(cmd.params);
+      const gaodeHasPolygon = gaodeFirst.geojson
+        ? gaodeFirst.geojson.features.some((f: any) => f.geometry?.type === 'Polygon' || f.geometry?.type === 'MultiPolygon')
+        : false;
+
+      if (gaodeHasPolygon) {
+        result = { type: 'custom', label: gaodeFirst.label, geojson: gaodeFirst.geojson!, description: gaodeFirst.description };
+      } else if (gaodeFirst.geojson && gaodeFirst.geojson.features.length > 0) {
+        // 高德有点但无面 → 先试 OSM 拿面，失败再用高德的点
+        const osmResult = await queryFeature(cmd.params);
+        if (osmResult.geojson && osmResult.geojson.features.length > 0) {
+          result = osmResult;
+        } else {
+          result = { type: 'custom', label: gaodeFirst.label, geojson: gaodeFirst.geojson, description: `⚠️ 仅坐标定位：${gaodeFirst.description}` };
         }
+      } else {
+        result = await queryFeature(cmd.params);
       }
       if (result.geojson) {
         resultBbox = getFCBbox(result.geojson);
@@ -1734,14 +1741,30 @@ export async function executeOSMCommand(
 
     // ====== 线状边界（仅轮廓，不填充）—— 自动适配行政区+自然地物 ======
     case 'outline': {
-      // 先试行政区查询，失败则回退到通用 feature 查询
-      let geoResult = await queryBoundary(cmd.params);
-      if (!geoResult.geojson || geoResult.geojson.features.length === 0) {
-        geoResult = await queryFeature(cmd.params);
+      let geoResult: OSMQueryResult;
+      const gaodeFirst = await gaodeGeocode(cmd.params);
+      const gaodeHasPolygon = gaodeFirst.geojson
+        ? gaodeFirst.geojson.features.some((f: any) => f.geometry?.type === 'Polygon' || f.geometry?.type === 'MultiPolygon')
+        : false;
+
+      if (gaodeHasPolygon) {
+        geoResult = { type: 'outline', label: gaodeFirst.label, geojson: gaodeFirst.geojson!, description: gaodeFirst.description };
+      } else if (gaodeFirst.geojson && gaodeFirst.geojson.features.length > 0) {
+        // 高德有点无面 → 尝试 OSM 拿面
+        const osmResult = await queryBoundary(cmd.params);
+        if (osmResult.geojson && osmResult.geojson.features.length > 0) {
+          geoResult = osmResult;
+        } else {
+          geoResult = { type: 'outline', label: gaodeFirst.label, geojson: gaodeFirst.geojson, description: `⚠️ 仅坐标，无法绘制轮廓` };
+        }
+      } else {
+        geoResult = await queryBoundary(cmd.params);
+        if (!geoResult.geojson || geoResult.geojson.features.length === 0) {
+          geoResult = await queryFeature(cmd.params);
+        }
       }
       if (geoResult.geojson && geoResult.geojson.features.length > 0) {
         resultBbox = getFCBbox(geoResult.geojson);
-        // 将 Polygon/MultiPolygon 转换为仅轮廓 LineString
         geoResult.geojson = convertPolygonToOutline(geoResult.geojson);
         geoResult.description = geoResult.description.replace('边界数据', '边界轮廓线');
       }

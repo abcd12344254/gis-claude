@@ -14,8 +14,7 @@ interface GaodeGeocode {
   province: string;
   city: string;
   district: string;
-  location: string;      // GCJ-02 "lng,lat"
-  wgs84_location?: string; // WGS-84 "lng,lat" (由后端转换)
+  location: string;      // GCJ-02 "lng,lat"（与高德底图对齐）
   level: string;
 }
 
@@ -25,8 +24,7 @@ interface GaodePOI {
   name: string;
   type: string;
   address: string;
-  location: string;       // GCJ-02
-  wgs84_location?: string; // WGS-84
+  location: string;       // GCJ-02（与高德底图对齐）
   pname: string;
   cityname: string;
   adname: string;
@@ -76,8 +74,7 @@ export async function gaodeGeocode(
     }
 
     const geocode: GaodeGeocode = data.geocodes[0];
-    const locStr = geocode.wgs84_location || geocode.location;
-    const [lng, lat] = locStr.split(',').map(Number);
+    const [lng, lat] = geocode.location.split(',').map(Number);
 
     const geojson = gaodeToGeoJSON([{
       lng, lat,
@@ -123,8 +120,7 @@ export async function gaodePOISearch(
     }
 
     const results = (data.pois as GaodePOI[]).map((poi) => {
-      const locStr = poi.wgs84_location || poi.location;
-      const [lng, lat] = locStr.split(',').map(Number);
+      const [lng, lat] = poi.location.split(',').map(Number);
       return { lng, lat, name: poi.name, address: poi.address, source: 'gaode' };
     });
 

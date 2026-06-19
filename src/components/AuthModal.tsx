@@ -14,23 +14,29 @@ const AuthModal: React.FC<AuthModalProps> = ({ open, onClose }) => {
   const { setAuth } = useGISStore();
 
   const handleSubmit = async (values: { email: string; password: string }) => {
+    if (loading) return;
     setLoading(true);
+    const endpoint = activeTab === 'login' ? '/api/auth/login' : '/api/auth/register';
+    console.log(`[AuthModal] 提交 ${activeTab}:`, values.email, endpoint);
     try {
-      const endpoint = activeTab === 'login' ? '/api/auth/login' : '/api/auth/register';
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(values),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      console.log(`[AuthModal] 响应:`, res.status, data);
       if (!res.ok) {
-        throw new Error(data.detail || '请求失败');
+        throw new Error(data.detail || `服务器错误 (${res.status})`);
       }
+      console.log(`[AuthModal] 成功:`, data.user?.id, data.user?.email);
       setAuth(data.token, data.user);
       message.success(activeTab === 'login' ? '登录成功！' : '注册成功！');
       onClose();
     } catch (err) {
-      message.error(err instanceof Error ? err.message : '操作失败');
+      const msg = err instanceof Error ? err.message : '操作失败';
+      console.error(`[AuthModal] 失败:`, msg);
+      message.error({ content: msg, duration: 6 });
     } finally {
       setLoading(false);
     }

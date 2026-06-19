@@ -123,15 +123,53 @@ body,
   pointer-events: none;
 }
 
+/* ====== AI 浮动按钮脉冲动画 ====== */
+.ai-float-btn .ant-float-btn-body {
+  animation: ai-pulse 3s ease-in-out infinite;
+}
+
+.ai-float-btn .ant-float-btn-description {
+  font-weight: 600;
+  color: #1677ff !important;
+}
+
+@keyframes ai-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(22, 119, 255, 0.4); }
+  50% { box-shadow: 0 0 0 10px rgba(22, 119, 255, 0); }
+}
+
+/* ====== 移动端底部抽屉 ====== */
+.mobile-ai-drawer .ant-drawer-content-wrapper {
+  border-radius: 16px 16px 0 0 !important;
+  overflow: hidden;
+}
+
+/* 拖拽指示条（视觉提示可从底部拉起） */
+.mobile-ai-drawer .ant-drawer-header::before {
+  content: '';
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 36px;
+  height: 4px;
+  background: #d9d9d9;
+  border-radius: 2px;
+}
+
 /* ====== 移动端适配 ====== */
 @media (max-width: 768px) {
-  .maplibregl-ctrl-group {
-    transform: scale(0.85);
-    transform-origin: top right;
+  /* 地图控件上移，避免被 FloatButton 遮挡 */
+  .maplibregl-ctrl-bottom-left {
+    bottom: 112px !important;
+  }
+  .maplibregl-ctrl-bottom-right {
+    bottom: 112px !important;
   }
 
-  .maplibregl-ctrl-bottom-left {
-    bottom: 100px !important;
+  .maplibregl-ctrl-group {
+    transform: scale(0.9);
+    transform-origin: top right;
   }
 
   .ant-popover,
@@ -143,18 +181,39 @@ body,
     -webkit-overflow-scrolling: touch;
   }
 
+  /* 全局最小触控目标 */
   .ant-btn {
     touch-action: manipulation;
+    min-height: 36px;
+    min-width: 36px;
+  }
+
+  /* 图层列表项增大触控区域 */
+  .layer-item {
+    padding: 10px 8px !important;
+    min-height: 48px;
+  }
+
+  /* 抽屉标签页 */
+  .ant-tabs-tab {
+    padding: 8px 12px !important;
+    font-size: 13px;
+  }
+
+  /* 安全区：iPhone 刘海 / 底部指示条 */
+  .ant-drawer-content-wrapper {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
   }
 }
 
 @media (max-width: 480px) {
   .maplibregl-ctrl-group {
-    transform: scale(0.7);
+    transform: scale(0.75);
   }
 
-  .maplibregl-ctrl-bottom-left {
-    bottom: 110px !important;
+  .maplibregl-ctrl-bottom-left,
+  .maplibregl-ctrl-bottom-right {
+    bottom: 116px !important;
   }
 }
 

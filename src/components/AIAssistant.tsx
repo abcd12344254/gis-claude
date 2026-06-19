@@ -28,6 +28,7 @@ import {
   GlobalOutlined,
 } from '@ant-design/icons';
 import { useGISStore } from '../store/useGISStore';
+import { useIsMobile } from '../hooks/useIsMobile';
 import { chatWithDeepSeekProxy, chatWithDeepSeekStream } from '../services/deepseek';
 import {
   parseOSMCommands, executeOSMCommand,
@@ -1116,6 +1117,8 @@ const AIAssistant: React.FC = () => {
     mapState,
   } = useGISStore();
 
+  const isMobile = useIsMobile();
+
   const [inputValue, setInputValue] = useState('');
   const [osmLoading, setOsmLoading] = useState<Record<string, boolean>>({});
   const [osmResults, setOsmResults] = useState<Record<string, OSMQueryResult>>({});
@@ -1570,16 +1573,13 @@ ${text}`;
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {/* Header */}
-      <div style={{ padding: '12px 16px', borderBottom: '1px solid #e8e8e8', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <div style={{ padding: isMobile ? '8px 12px' : '12px 16px', borderBottom: '1px solid #e8e8e8', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <Space>
-          <Avatar icon={<RobotOutlined />} style={{ background: '#1677ff' }} size="small" />
-          <Text strong style={{ fontSize: 14 }}>GIS 智能助手</Text>
+          <Avatar icon={<RobotOutlined />} style={{ background: '#1677ff' }} size={isMobile ? 28 : 'small'} />
+          {!isMobile && <Text strong style={{ fontSize: 14 }}>GIS 智能助手</Text>}
           <Tag color="green" style={{ fontSize: 10 }}>DeepSeek</Tag>
-          <Tag color="blue" style={{ fontSize: 10 }}>OSM数据</Tag>
         </Space>
-        <Space size="small">
-          <Tooltip title="清除对话"><Button type="text" size="small" icon={<ClearOutlined />} onClick={handleClear} /></Tooltip>
-        </Space>
+        <Button type="text" size={isMobile ? 'middle' : 'small'} icon={<ClearOutlined />} onClick={handleClear} />
       </div>
 
       {/* Messages */}
@@ -1597,7 +1597,7 @@ ${text}`;
                   maxWidth: '92%', padding: '10px 14px', borderRadius: 12,
                   background: msg.role === 'user' ? '#1677ff' : msg.content.startsWith('❌') ? '#fff2f0' : '#f5f5f5',
                   color: msg.role === 'user' ? '#fff' : msg.content.startsWith('❌') ? '#cf1322' : '#333',
-                  fontSize: 13, lineHeight: 1.7,
+                  fontSize: isMobile ? 14 : 13, lineHeight: 1.7,
                 }}
               >
                 {msg.role === 'assistant' ? (
@@ -1805,7 +1805,7 @@ ${text}`;
               {QUICK_PROMPTS.map((qp) => (
                 <Tag
                   key={qp.label}
-                  style={{ cursor: 'pointer', padding: '4px 10px', borderRadius: 16, fontSize: 12, border: '1px dashed #d9d9d9', background: '#fafafa' }}
+                  style={{ cursor: 'pointer', padding: isMobile ? '8px 14px' : '4px 10px', borderRadius: 16, fontSize: isMobile ? 13 : 12, border: '1px dashed #d9d9d9', background: '#fafafa' }}
                   onClick={() => handleQuickPrompt(qp.prompt)}
                 >
                   {qp.icon} {qp.label}
@@ -1842,8 +1842,8 @@ ${text}`;
             disabled={!user}
             style={{ flex: 1, borderRadius: 8 }}
           />
-          <Button type="primary" icon={<SendOutlined />} onClick={handleSend} loading={isChatLoading} disabled={!inputValue.trim() || !user} style={{ borderRadius: 8, height: 'auto' }}>
-            发送
+          <Button type="primary" icon={<SendOutlined />} onClick={handleSend} loading={isChatLoading} disabled={!inputValue.trim() || !user} size={isMobile ? 'middle' : undefined} style={{ borderRadius: 8, minWidth: isMobile ? 48 : undefined }}>
+            {isMobile ? '' : '发送'}
           </Button>
         </div>
       </div>

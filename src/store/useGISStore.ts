@@ -6,6 +6,7 @@ export interface UserInfo {
   email: string;
   plan: string;
   quota_remaining?: number;
+  is_admin?: boolean;
 }
 
 interface GISStore {
