@@ -13,7 +13,9 @@ from pydantic import BaseModel
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "gis-claude-dev-secret-change-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24 * 7  # 7 天
-DB_PATH = os.path.join(os.path.dirname(__file__), "users.db")
+# Render 持久化磁盘 /data，本地开发回退到 server/ 目录
+_DATA_DIR = "/data" if os.path.exists("/data") else os.path.dirname(__file__)
+DB_PATH = os.path.join(_DATA_DIR, "users.db")
 
 # === 密码哈希 ===
 # bcrypt 72字节限制 → create_user / authenticate_user 中已处理

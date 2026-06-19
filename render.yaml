@@ -4,6 +4,10 @@ services:
     env: python
     buildCommand: pip install -r server/requirements.txt
     startCommand: cd server && python main.py
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
     envVars:
       - key: DEEPSEEK_API_KEY
         sync: false
