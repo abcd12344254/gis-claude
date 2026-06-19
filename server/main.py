@@ -910,10 +910,9 @@ class DEMExportRequest(BaseModel):
 
 @app.post("/api/dem/geotiff")
 async def dem_export_geotiff(req: DEMExportRequest):
-    """将高程采样网格导出为 GeoTIFF 文件"""
+    """将高程采样网格导出为 GeoTIFF 文件（纯 Python 实现，零依赖）"""
     import numpy as np
-    import rasterio
-    from rasterio.transform import from_bounds
+    import struct
     import io
 
     valid = [p for p in req.grid if p.get("elevation") is not None]
@@ -922,12 +921,10 @@ async def dem_export_geotiff(req: DEMExportRequest):
 
     lngs = [p["lng"] for p in valid]
     lats = [p["lat"] for p in valid]
-    elevs = [p["elevation"] for p in valid]
 
     w, e = min(lngs), max(lngs)
     s, n = min(lats), max(lats)
 
-    # 推断网格分辨率
     grid_size = int(len(valid) ** 0.5)
     if grid_size < 2:
         raise HTTPException(status_code=400, detail="无法推断网格尺寸")
@@ -950,21 +947,114 @@ async def dem_export_geotiff(req: DEMExportRequest):
                 weight = 1e10 if dist < 1e-10 else 1.0 / (dist * dist)
                 elev_sum += vp["elevation"] * weight
                 weight_sum += weight
-            data[j, i] = elev_sum / weight_sum if weight_sum > 0 else 0.0
+            data[j, i] = float(elev_sum / weight_sum if weight_sum > 0 else 0.0)
 
-    transform = from_bounds(w, s, e, n, grid_size, grid_size)
+    pixel_width = (e - w) / grid_size
+    pixel_height = (n - s) / grid_size
 
+    # 写入 GeoTIFF (手动构建 TIFF + GeoKeys)
     buf = io.BytesIO()
-    with rasterio.open(
-        buf, "w", driver="GTiff",
-        height=grid_size, width=grid_size,
-        count=1, dtype="float32",
-        crs="EPSG:4326", transform=transform,
-        compress="lzw",
-    ) as dst:
-        dst.write(data, 1)
-    buf.seek(0)
+    write_le = lambda fmt, *vals: buf.write(struct.pack("<" + fmt, *vals))
 
+    # Float32 光栅数据（行优先，左上角开始）
+    raw_data = data.tobytes()
+
+    # TIFF 头
+    write_le("H", 0x4949)  # little-endian
+    write_le("H", 42)       # TIFF magic
+    # IFD 偏移（紧接头后）
+    ifd_offset = 8
+    # GeoKey 值
+    gt_model_type = 2          # geographic
+    gt_raster_type = 1         # pixel is area
+    gt_citation = "WGS 84 / EPSG:4326"
+    geographic_type = 4326
+    geog_angular_units = 9102  # degree
+
+    # 构建 GeoKeyDirectory
+    # 每个 key: {key_id, tiff_tag_location, count, value}
+    geo_keys = [
+        (1024, 0, 1, gt_model_type),
+        (1025, 0, 1, gt_raster_type),
+        (2048, 0, 1, geographic_type),
+        (2054, 0, 1, geog_angular_units),
+    ]
+    geo_key_data = b""
+    for kid, loc, cnt, val in geo_keys:
+        geo_key_data += struct.pack("<HHHH", kid, loc, cnt, val)
+
+    # GeoAsciiParams
+    geo_ascii = gt_citation.encode("ascii") + b"\x00"
+
+    # ModelTiepointTag: (0, 0, 0) → (west, north, 0)
+    tiepoint = struct.pack("<ddd", 0.0, 0.0, 0.0) + struct.pack("<ddd", w, n, 0.0)
+
+    # ModelPixelScaleTag: (pixel_width, pixel_height, 0)
+    pixel_scale = struct.pack("<ddd", pixel_width, pixel_height, 0.0)
+
+    # 构建所有 TIFF 标签
+    tags = [
+        (256, 4, 1, struct.pack("<I", grid_size)),                # ImageWidth
+        (257, 4, 1, struct.pack("<I", grid_size)),                # ImageLength
+        (258, 3, 1, struct.pack("<H", 32)),                       # BitsPerSample
+        (259, 3, 1, struct.pack("<H", 1)),                        # Compression (none)
+        (262, 3, 1, struct.pack("<H", 1)),                        # Photometric (min is black)
+        (273, 4, 1, b"\x00"),                                     # StripOffsets (placeholder)
+        (277, 3, 1, struct.pack("<H", 1)),                        # SamplesPerPixel
+        (278, 4, 1, struct.pack("<I", grid_size)),                # RowsPerStrip
+        (279, 4, 1, b"\x00"),                                     # StripByteCounts (placeholder)
+        (282, 5, 1, b"\x00"),                                     # XResolution (placeholder)
+        (283, 5, 1, b"\x00"),                                     # YResolution (placeholder)
+        (296, 3, 1, struct.pack("<H", 2)),                        # ResolutionUnit (inch)
+        (339, 3, 1, struct.pack("<H", 3)),                        # SampleFormat (float)
+        (33550, 12, 3, pixel_scale),                               # ModelPixelScaleTag
+        (33922, 12, 6, tiepoint),                                  # ModelTiepointTag
+        (34735, 3, len(geo_key_data) // 2, geo_key_data),          # GeoKeyDirectoryTag
+        (34737, 2, len(geo_ascii), geo_ascii),                     # GeoAsciiParamsTag
+    ]
+
+    # 计算 strip 偏移位置
+    ifd_entry_size = 12
+    num_tags = len(tags)
+    tag_data_start = ifd_offset + 2 + num_tags * ifd_entry_size + 4
+    # 按数据 -> 标签顺序排列
+    extra_data = tiepoint + pixel_scale + geo_key_data + geo_ascii
+    extra_offset = tag_data_start
+    strip_offset = extra_offset + len(extra_data)
+    strip_byte_count = len(raw_data)
+
+    # 更新 StripOffsets 和 StripByteCounts
+    for i, (tid, _, _, _) in enumerate(tags):
+        if tid == 273:
+            tags[i] = (273, 4, 1, struct.pack("<I", strip_offset))
+        elif tid == 279:
+            tags[i] = (279, 4, 1, struct.pack("<I", strip_byte_count))
+
+    # 写 IFD 条目
+    buf.seek(ifd_offset)
+    write_le("H", num_tags)
+    for tid, dtype, count, value in tags:
+        write_le("H", tid)
+        write_le("H", dtype)
+        write_le("I", count)
+        if len(value) <= 4:
+            buf.write(value.ljust(4, b"\x00"))
+        else:
+            write_le("I", extra_offset)
+            extra_offset += len(value)
+    write_le("I", 0)  # next IFD
+
+    # 写额外数据
+    buf.write(tiepoint)
+    buf.write(pixel_scale)
+    buf.write(geo_key_data)
+    buf.write(geo_ascii)
+
+    # 写光栅数据
+    buf.seek(strip_offset)
+    buf.write(raw_data)
+
+    buf.seek(0)
     filename = f"{req.name}_DEM.tif"
     from fastapi.responses import Response
     return Response(
