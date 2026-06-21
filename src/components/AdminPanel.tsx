@@ -1,7 +1,8 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { Table, Button, message, Typography, Card, Space, Tag, Modal } from 'antd';
-import { DownloadOutlined, ReloadOutlined, UserOutlined, VerifiedOutlined, PlusOutlined } from '@ant-design/icons';
+import { DownloadOutlined, ReloadOutlined, UserOutlined, VerifiedOutlined, PlusOutlined, DollarOutlined } from '@ant-design/icons';
 import { useGISStore } from '../store/useGISStore';
+import RechargeModal from './RechargeModal';
 
 const { Text } = Typography;
 
@@ -32,6 +33,8 @@ const AdminPanel: React.FC<{ open: boolean; onClose: () => void }> = ({ open, on
   const [users, setUsers] = useState<UserRecord[]>([]);
   const [stats, setStats] = useState<AdminStats>({ total: 0, verified: 0, today_new: 0 });
   const [loading, setLoading] = useState(false);
+  const [rechargeModalOpen, setRechargeModalOpen] = useState(false);
+  const [selectedUser, setSelectedUser] = useState<{ id: number; email: string } | null>(null);
 
   // 每次调用时直接从 store 拿最新 token，避免闭包过期
   const fetchUsers = useCallback(async () => {
@@ -114,6 +117,22 @@ const AdminPanel: React.FC<{ open: boolean; onClose: () => void }> = ({ open, on
       title: '注册时间', dataIndex: 'created_at', width: 140,
       render: (t: string) => t?.replace('T', ' ')?.slice(0, 19) || '—',
     },
+    {
+      title: '操作', width: 80, fixed: 'right' as const,
+      render: (_: any, r: UserRecord) => (
+        <Button
+          type="link"
+          size="small"
+          icon={<DollarOutlined />}
+          onClick={() => {
+            setSelectedUser({ id: r.id, email: r.email });
+            setRechargeModalOpen(true);
+          }}
+        >
+          充值
+        </Button>
+      ),
+    },
   ];
 
   return (
@@ -160,7 +179,20 @@ const AdminPanel: React.FC<{ open: boolean; onClose: () => void }> = ({ open, on
         loading={loading}
         size="small"
         pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 个用户` }}
-        scroll={{ x: 600 }}
+        scroll={{ x: 700 }}
+      />
+
+      <RechargeModal
+        open={rechargeModalOpen}
+        onClose={() => { setRechargeModalOpen(false); setSelectedUser(null); }}
+        adminMode={true}
+        adminUserId={selectedUser?.id}
+        adminUserEmail={selectedUser?.email}
+        onSuccess={() => {
+          setRechargeModalOpen(false);
+          setSelectedUser(null);
+          fetchUsers();
+        }}
       />
     </Modal>
   );

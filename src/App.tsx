@@ -10,6 +10,7 @@ import {
   RobotOutlined,
   MenuFoldOutlined,
   MoreOutlined,
+  CrownOutlined,
 } from '@ant-design/icons';
 import MapView from './components/MapView';
 import LayerPanel from './components/LayerPanel';
@@ -23,6 +24,7 @@ import ErrorBoundary from './components/ErrorBoundary';
 import AuthModal from './components/AuthModal';
 import ProjectManager from './components/ProjectManager';
 import AdminPanel from './components/AdminPanel';
+import RechargeModal from './components/RechargeModal';
 import LoginPage from './components/LoginPage';
 import { useGISStore } from './store/useGISStore';
 import { useIsMobile } from './hooks/useIsMobile';
@@ -37,6 +39,7 @@ const App: React.FC = () => {
   const [leftDrawerOpen, setLeftDrawerOpen] = useState(false);
   const [rightDrawerOpen, setRightDrawerOpen] = useState(false);
   const [adminPanelOpen, setAdminPanelOpen] = useState(false);
+  const [rechargeModalOpen, setRechargeModalOpen] = useState(false);
   const { deepseekApiKey, setDeepseekApiKey, layers, setLayers, clearChat, user, logout } =
     useGISStore();
 
@@ -118,6 +121,7 @@ const App: React.FC = () => {
         <Dropdown menu={{ items: [
           { key: 'plan', label: `套餐：${user.plan === 'pro' ? '专业版' : user.plan === 'team' ? '团队版' : '免费版'}`, disabled: true },
           { key: 'quota', label: `今日剩余：${user.quota_remaining ?? '—'} 次`, disabled: true },
+          { key: 'recharge', label: '💰 充值 / 升级', icon: <CrownOutlined />, onClick: () => setRechargeModalOpen(true) },
           { type: 'divider' },
           { key: 'logout', label: '退出登录', icon: <LogoutOutlined />, onClick: () => { logout(); message.success('已退出登录'); } },
         ]}}>
@@ -148,8 +152,9 @@ const App: React.FC = () => {
   }
   if (user) {
     overflowItems.unshift(
-      { key: 'plan', label: `套餐：${user.plan === 'pro' ? '专业版' : '免费版'}`, disabled: true },
+      { key: 'plan', label: `套餐：${user.plan === 'pro' ? '专业版' : user.plan === 'team' ? '团队版' : '免费版'}`, disabled: true },
       { key: 'quota', label: `今日剩余：${user.quota_remaining ?? '—'} 次`, disabled: true },
+      { key: 'recharge', label: '💰 充值 / 升级', icon: <CrownOutlined />, onClick: () => setRechargeModalOpen(true) },
       { key: 'logout', label: '退出登录', icon: <LogoutOutlined />, onClick: () => { logout(); message.success('已退出登录'); } },
       { type: 'divider' as const },
     );
@@ -267,6 +272,7 @@ const App: React.FC = () => {
       </Modal>
 
       <AuthModal open={authModalOpen} onClose={() => setAuthModalOpen(false)} />
+      <RechargeModal open={rechargeModalOpen} onClose={() => setRechargeModalOpen(false)} isMobile={isMobile} />
       <AdminPanel open={adminPanelOpen} onClose={() => setAdminPanelOpen(false)} />
     </Layout>
   );

@@ -17,6 +17,9 @@ ACCESS_TOKEN_EXPIRE_HOURS = 24 * 7  # 7 天
 _DATA_DIR = "/data" if os.path.exists("/data") else os.path.dirname(__file__)
 DB_PATH = os.path.join(_DATA_DIR, "users.db")
 
+# 套餐配额映射
+PLAN_QUOTAS = {"free": 50, "pro": 200, "team": 1000}
+
 # === 密码哈希 ===
 # bcrypt 72字节限制 → create_user / authenticate_user 中已处理
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -244,3 +247,38 @@ def get_user_stats() -> dict:
     ).fetchone()["c"]
     conn.close()
     return {"total": total, "verified": verified, "today_new": today_new}
+
+
+def upgrade_user_plan(user_id: int, plan: str, quota_daily: int | None = None) -> dict:
+    """升级用户套餐，可选自定义配额"""
+    if plan not in PLAN_QUOTAS:
+        raise HTTPException(status_code=400, detail=f"无效套餐: {plan}，可选: {', '.join(PLAN_QUOTAS.keys())}")
+    new_quota = quota_daily if quota_daily is not None else PLAN_QUOTAS[plan]
+    conn = _get_conn()
+    conn.execute(
+        "UPDATE users SET plan = ?, quota_daily = ?, quota_used_today = 0 WHERE id = ?",
+        (plan, new_quota, user_id),
+    )
+    conn.commit()
+    user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    conn.close()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    return dict(user)
+
+
+def add_user_quota(user_id: int, amount: int) -> dict:
+    """为用户增加每日配额"""
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="充值数量必须大于 0")
+    conn = _get_conn()
+    conn.execute(
+        "UPDATE users SET quota_daily = quota_daily + ? WHERE id = ?",
+        (amount, user_id),
+    )
+    conn.commit()
+    user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    conn.close()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    return dict(user)

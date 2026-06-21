@@ -31,6 +31,9 @@ from auth import (
     list_all_users,
     get_user_stats,
     is_admin,
+    upgrade_user_plan,
+    add_user_quota,
+    PLAN_QUOTAS,
     UserRegister,
     UserLogin,
     UserInfo,
@@ -121,6 +124,23 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     content: str
     model: str = "deepseek-chat"
+
+
+class RechargeUpgradeRequest(BaseModel):
+    plan: str  # "free" | "pro" | "team"
+
+
+class RechargeQuotaRequest(BaseModel):
+    amount: int
+
+
+class AdminUpgradeRequest(BaseModel):
+    plan: str
+    quota_daily: int | None = None
+
+
+class AdminQuotaRequest(BaseModel):
+    amount: int
 
 
 def get_httpx_client(timeout: float = 30.0) -> httpx.AsyncClient:
@@ -256,6 +276,66 @@ async def admin_export_users(admin: dict = Depends(get_admin_user)):
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=users_export.csv"},
     )
+
+
+# ====== 充值 / 升级 ======
+
+
+def _user_response(user: dict) -> dict:
+    """构建统一的用户信息返回"""
+    quota_remaining = max(0, user.get("quota_daily", 0) - user.get("quota_used_today", 0))
+    return {
+        "id": user["id"],
+        "email": user["email"],
+        "plan": user["plan"],
+        "quota_daily": user["quota_daily"],
+        "quota_used_today": user.get("quota_used_today", 0),
+        "quota_remaining": quota_remaining,
+        "is_admin": is_admin(user),
+    }
+
+
+@app.post("/api/recharge/upgrade")
+async def recharge_upgrade(req: RechargeUpgradeRequest, user: dict = Depends(get_current_user)):
+    """自助升级套餐"""
+    if req.plan not in PLAN_QUOTAS:
+        raise HTTPException(status_code=400, detail=f"无效套餐: {req.plan}，可选: {', '.join(PLAN_QUOTAS.keys())}")
+    updated = upgrade_user_plan(user["id"], req.plan)
+    plan_names = {"free": "免费版", "pro": "专业版", "team": "团队版"}
+    return {"ok": True, "user": _user_response(updated), "message": f"已升级至 {plan_names.get(req.plan, req.plan)}"}
+
+
+@app.post("/api/recharge/quota")
+async def recharge_quota(req: RechargeQuotaRequest, user: dict = Depends(get_current_user)):
+    """自助充值配额"""
+    if req.amount <= 0:
+        raise HTTPException(status_code=400, detail="充值数量必须大于 0")
+    updated = add_user_quota(user["id"], req.amount)
+    return {"ok": True, "user": _user_response(updated), "message": f"已增加 {req.amount} 次每日配额"}
+
+
+@app.post("/api/admin/users/{user_id}/upgrade")
+async def admin_upgrade_user(user_id: int, req: AdminUpgradeRequest, admin: dict = Depends(get_admin_user)):
+    """管理员给指定用户升级套餐"""
+    if req.plan not in PLAN_QUOTAS:
+        raise HTTPException(status_code=400, detail=f"无效套餐: {req.plan}")
+    target = get_user_by_id(user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    updated = upgrade_user_plan(user_id, req.plan, req.quota_daily)
+    return {"ok": True, "user": _user_response(updated)}
+
+
+@app.post("/api/admin/users/{user_id}/quota")
+async def admin_add_user_quota(user_id: int, req: AdminQuotaRequest, admin: dict = Depends(get_admin_user)):
+    """管理员给指定用户增加配额"""
+    if req.amount <= 0:
+        raise HTTPException(status_code=400, detail="充值数量必须大于 0")
+    target = get_user_by_id(user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    updated = add_user_quota(user_id, req.amount)
+    return {"ok": True, "user": _user_response(updated)}
 
 
 # ====== Projects ======

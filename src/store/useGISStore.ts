@@ -6,6 +6,8 @@ export interface UserInfo {
   email: string;
   plan: string;
   quota_remaining?: number;
+  quota_daily?: number;
+  quota_used_today?: number;
   is_admin?: boolean;
 }
 
@@ -64,6 +66,7 @@ interface GISStore {
   authToken: string;
   user: UserInfo | null;
   setAuth: (token: string, user: UserInfo) => void;
+  setUser: (partial: Partial<UserInfo>) => void;
   logout: () => void;
   isLoggedIn: () => boolean;
 }
@@ -196,6 +199,14 @@ export const useGISStore = create<GISStore>((set) => ({
     localStorage.setItem('gis_user', JSON.stringify(user));
     set({ authToken: token, user });
   },
+  setUser: (partial) =>
+    set((s) => {
+      const updated = s.user ? { ...s.user, ...partial } : s.user;
+      if (updated) {
+        localStorage.setItem('gis_user', JSON.stringify(updated));
+      }
+      return { user: updated };
+    }),
   logout: () => {
     localStorage.removeItem('gis_auth_token');
     localStorage.removeItem('gis_user');
