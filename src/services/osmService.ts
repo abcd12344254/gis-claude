@@ -835,35 +835,20 @@ export async function queryWaterways(
   const bboxHeight = n - s;
   const isLargeArea = bboxWidth > 2 || bboxHeight > 2;
 
-  // 用短超时+out geom减小响应体积，避免 Overpass 502
+  // way + rel 分开查，避免 nwr 返回大量重复和无关节点
   const query = `[out:json][timeout:30];
 (
-  nwr["waterway"](${s},${w},${n},${e});
-  nwr["natural"="water"](${s},${w},${n},${e});
-  nwr["water"](${s},${w},${n},${e});
+  way["waterway"](${s},${w},${n},${e});
+  way["natural"="water"](${s},${w},${n},${e});
+  rel["natural"="water"](${s},${w},${n},${e});
+  rel["water"](${s},${w},${n},${e});
 );
 out geom;`;
 
-  // 大区域拆成两次查询：先 waterways + water，再 natural=water
-  const queryLarge = `[out:json][timeout:30];
-(
-  nwr["waterway"="river"](${s},${w},${n},${e});
-  nwr["natural"="water"](${s},${w},${n},${e});
-);
-out geom;`;
-
-  const selectedQuery = isLargeArea ? queryLarge : query;
+  const selectedQuery = query;
 
   try {
     const geojson = await overpassQuery(selectedQuery);
-    // 大区域再补查 canal/stream 等次要水系
-    if (isLargeArea) {
-      try {
-        const q2 = `[out:json][timeout:25];(nwr["waterway"="canal"](${s},${w},${n},${e});nwr["waterway"="stream"](${s},${w},${n},${e});nwr["water"](${s},${w},${n},${e}););out geom;`;
-        const geojson2 = await overpassQuery(q2);
-        geojson.features.push(...geojson2.features);
-      } catch { /* 补充查询失败不碍事 */ }
-    }
     return {
       type: 'water',
       label: '水系',
