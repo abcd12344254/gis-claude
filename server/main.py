@@ -160,29 +160,23 @@ def get_overpass_client() -> httpx.AsyncClient:
 
 @app.get("/api/health")
 async def health_check():
-    from auth import DB_PATH
-    db_exists = os.path.exists(DB_PATH)
-    db_size = os.path.getsize(DB_PATH) if db_exists else 0
-    user_count = 0
-    if db_exists:
-        try:
-            import sqlite3
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-            c.execute("SELECT COUNT(*) FROM users")
-            user_count = c.fetchone()[0]
-            conn.close()
-        except: pass
+    from auth import DB_PATH, _USE_TURSO
+    turso_configured = bool(os.getenv("TURSO_URL") and os.getenv("TURSO_TOKEN"))
+    user_count = -1
+    try:
+        conn = __import__('auth')._get_conn()
+        r = conn.execute("SELECT COUNT(*) as c FROM users").fetchone()
+        user_count = r.get("c", 0) if isinstance(r, dict) else (r[0] if r else 0)
+        conn.close()
+    except Exception as e:
+        user_count = -1
     return {
         "status": "ok",
         "service": "GIS Claude API",
-        "osm_proxy": OSM_PROXY or "direct",
-        "db_path": DB_PATH,
-        "db_exists": db_exists,
-        "db_size_kb": round(db_size / 1024, 1),
+        "use_turso": _USE_TURSO,
+        "turso_env_set": turso_configured,
+        "db_path": DB_PATH[:60] + "..." if len(DB_PATH) > 60 else DB_PATH,
         "user_count": user_count,
-        "on_render": bool(os.environ.get("RENDER")),
-        "disk_persist": "verified",
     }
 
 
