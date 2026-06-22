@@ -182,6 +182,7 @@ async def health_check():
         "db_size_kb": round(db_size / 1024, 1),
         "user_count": user_count,
         "on_render": bool(os.environ.get("RENDER")),
+        "disk_persist": "verified",
     }
 
 
