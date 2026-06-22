@@ -20,8 +20,9 @@ _USE_TURSO = bool(TURSO_URL and TURSO_TOKEN)
 
 if _USE_TURSO:
     import httpx
+    TURSO_HTTP_URL = TURSO_URL.replace("libsql://", "https://")
     DB_PATH = TURSO_URL
-    print(f"[auth] Turso: {TURSO_URL}")
+    print(f"[auth] Turso: {TURSO_URL} → {TURSO_HTTP_URL}")
 else:
     import sqlite3 as _sql_driver
     if os.environ.get("RENDER"):
@@ -84,7 +85,7 @@ class _TursoConn:
         ]}
         try:
             resp = httpx.post(
-                f"{TURSO_URL}/v2/pipeline",
+                f"{TURSO_HTTP_URL}/v2/pipeline",
                 headers={"Authorization": f"Bearer {TURSO_TOKEN}"},
                 json=body, timeout=30.0
             )
