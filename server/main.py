@@ -2,7 +2,7 @@
 GIS Claude Backend Server
 提供 DeepSeek API 代理、OSM 数据代理、空间分析服务
 """
-import os
+import os, asyncio
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -79,6 +79,10 @@ OSM_PROXY = os.getenv("HTTPS_PROXY", os.getenv("HTTP_PROXY", None))
 
 NOMINATIM_URL = "https://nominatim.openstreetmap.org"
 OVERPASS_URL = "https://overpass-api.de"
+OVERPASS_FALLBACKS = [
+    "https://overpass.kumi.systems",
+    "https://overpass.private.coffee",
+]
 OSM_HEADERS = {
     "User-Agent": "GISClaude/1.0 (gis-learning-tool)",
     "Accept": "application/json",
@@ -707,7 +711,7 @@ async def osm_nominatim_search(
     limit: int = Query(5, description="结果数量"),
     polygon_geojson: int = Query(1, description="是否返回 GeoJSON 边界"),
 ):
-    """代理 Nominatim 地理编码查询（国内需配代理访问 OSM）"""
+    """代理 Nominatim 地理编码查询"""
     params = {
         "q": q,
         "format": "jsonv2",
@@ -717,23 +721,24 @@ async def osm_nominatim_search(
         "accept-language": "zh",
     }
 
-    try:
-        async with get_httpx_client() as client:
-            response = await client.get(f"{NOMINATIM_URL}/search", params=params)
-            response.raise_for_status()
-            return response.json()
-    except httpx.TimeoutException:
-        raise HTTPException(
-            status_code=504,
-            detail="Nominatim 请求超时。OSM API 在国内可能无法直接访问，请配置代理。在 server/.env 中设置 HTTPS_PROXY=http://127.0.0.1:端口",
-        )
-    except httpx.ConnectError as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"无法连接到 Nominatim ({NOMINATIM_URL})。国内用户请配置代理: 在 server/.env 中设置 HTTPS_PROXY=http://127.0.0.1:你的代理端口",
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Nominatim 查询失败: {str(e)}")
+    for attempt in range(2):  # 最多重试 1 次
+        try:
+            async with get_httpx_client() as client:
+                response = await client.get(f"{NOMINATIM_URL}/search", params=params)
+                response.raise_for_status()
+                return response.json()
+        except httpx.TimeoutException:
+            if attempt == 0:
+                await asyncio.sleep(2)
+                continue
+            raise HTTPException(status_code=504, detail="Nominatim 请求超时")
+        except httpx.ConnectError:
+            if attempt == 0:
+                await asyncio.sleep(2)
+                continue
+            raise HTTPException(status_code=502, detail=f"无法连接到 Nominatim ({NOMINATIM_URL})")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Nominatim 查询失败: {str(e)}")
 
 
 @app.get("/api/osm/nominatim/reverse")
@@ -761,25 +766,34 @@ async def osm_nominatim_reverse(
 
 @app.post("/api/osm/overpass")
 async def osm_overpass_query(data: str = Query(..., description="Overpass QL 查询语句")):
-    """代理 Overpass API 空间查询（国内需配代理访问 OSM）"""
-    try:
-        async with get_overpass_client() as client:
-            response = await client.post(
-                f"{OVERPASS_URL}/api/interpreter",
-                data={"data": data},
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
-            response.raise_for_status()
-            return response.json()
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Overpass 请求超时，请配置代理")
-    except httpx.ConnectError:
-        raise HTTPException(
-            status_code=502,
-            detail=f"无法连接到 Overpass API。国内用户请在 server/.env 中设置 HTTPS_PROXY=http://127.0.0.1:你的代理端口",
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Overpass 查询失败: {str(e)}")
+    """代理 Overpass API 空间查询 — 多实例自动回退 + 重试"""
+    urls = [OVERPASS_URL] + OVERPASS_FALLBACKS
+    last_error = ""
+
+    for base_url in urls:
+        try:
+            async with get_overpass_client() as client:
+                response = await client.post(
+                    f"{base_url}/api/interpreter",
+                    data={"data": data},
+                )
+                if response.status_code == 502 or response.status_code == 504:
+                    # 服务器错误，尝试下一个实例
+                    last_error = f"{base_url} 返回 {response.status_code}"
+                    continue
+                response.raise_for_status()
+                return response.json()
+        except (httpx.TimeoutException, httpx.ConnectError) as e:
+            last_error = f"{base_url}: {str(e)}"
+            continue
+        except Exception as e:
+            last_error = f"{base_url}: {str(e)}"
+            continue
+
+    raise HTTPException(
+        status_code=502,
+        detail=f"所有 Overpass 实例均不可用 ({', '.join(urls)})。最后错误: {last_error}",
+    )
 
 
 # ====== Wikidata 代理（国内访问 Wikidata 可能需要代理） ======
