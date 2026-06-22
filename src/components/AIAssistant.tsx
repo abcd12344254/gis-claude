@@ -69,6 +69,7 @@ import type { RouteResult, TravelMode } from '../services/routingService';
 import { queryEarthquakes, sampleElevationGrid, generateElevationPoints, generateElevationLabels, queryWeather, generateContours } from '../services/hazardService';
 import { flattenCoords, getFCBounds } from '../utils/geo';
 import { collectToolResults, formatToolResultsForAI, buildFeedbackUserContent, extractSuggestedActions, FEEDBACK_SYSTEM_PROMPT } from '../services/toolFeedback';
+import type { ToolResult } from '../services/toolFeedback';
 import { captureMapScreenshot, analyzeMapWithVision, buildVisionPrompt } from '../services/visionService';
 import { parseNLQuery, executeQuery, getQueryableFields } from '../services/nlQuery';
 
@@ -1391,6 +1392,220 @@ async function executeRouteCommand(
   return { description: result.description, geojson: result.geojson, routeResult: result };
 }
 
+// ====== 🤖 Agentic GIS 自主多步分析循环 ======
+
+const AGENTIC_ROUND_LIMIT = 4; // 最多 4 轮自动分析（含首轮）
+
+interface AgenticLoopContext {
+  osmExecutionResults: Array<{ key: string; label?: string; geojson?: FeatureCollection | null; description?: string; error?: string }>;
+  msgId: string;
+}
+
+/** Agentic 多轮分析主循环 — AI 看到结果后自主决定是否继续分析 */
+async function runAgenticLoop(
+  userRequest: string,
+  conversationHistory: Array<{ role: 'user' | 'assistant'; content: string }>,
+  previousToolResults: ToolResult[],
+  preExecMsgCount: number,
+  apiKey: string,
+  authToken: string,
+  loopCtx: AgenticLoopContext,
+  round: number = 1
+): Promise<void> {
+  if (round > AGENTIC_ROUND_LIMIT) return;
+  if (previousToolResults.length === 0 && round > 1) return; // 无新增结果则停止
+
+  const feedbackText = formatToolResultsForAI(previousToolResults);
+  const store = useGISStore.getState();
+  const spatialContext = buildSpatialContextStatic(store);
+  const feedbackUserContent = buildFeedbackUserContent(userRequest, feedbackText, spatialContext);
+
+  // 首轮用普通反馈提示词，后续轮用 agentic 提示词
+  const systemPrompt = round === 1
+    ? FEEDBACK_SYSTEM_PROMPT
+    : `你是 GIS Claude 的自主分析引擎。你正在进行多步地理空间分析。
+
+你已经执行了前 ${round} 步分析操作。现在你收到了最新的工具执行结果。
+
+⚠️ 关键判断：
+- 如果分析已经完整（数据齐全、结论清晰）→ 用自然语言做最终总结，不要再生成指令
+- 如果还需要补充数据或进一步分析 → 继续生成 [OSM:...] 或 [ANALYSIS:...] 指令
+- 最多再执行 1-2 步，不要无限循环
+
+请在回复末尾明确标注 [DONE] 如果你认为分析已经完成。`;
+
+  const feedbackMessages = [
+    { role: 'system' as const, content: systemPrompt },
+    ...conversationHistory,
+    { role: 'user' as const, content: feedbackUserContent },
+  ];
+
+  const feedbackId = `agentic-r${round}-${Date.now()}`;
+  const placeholderMsg: ChatMessage = {
+    id: feedbackId,
+    role: 'assistant',
+    content: round === 1 ? '⏳ 正在分析结果...' : `⏳ 第 ${round} 轮分析中...`,
+    timestamp: Date.now(),
+  };
+  store.addChatMessage(placeholderMsg);
+
+  let reply = '';
+  try {
+    await chatWithDeepSeekStream(
+      feedbackMessages,
+      { apiKey, authToken },
+      (chunk) => { reply += chunk; store.updateChatMessage(feedbackId, { content: reply }); },
+      () => {
+        const finalReply = reply || '(无回复)';
+        store.updateChatMessage(feedbackId, { content: finalReply });
+        // 异步继续：解析回复中是否有新指令
+        continueAgenticLoop(userRequest, conversationHistory, reply, preExecMsgCount, apiKey, authToken, loopCtx, round);
+      },
+      (err) => { store.updateChatMessage(feedbackId, { content: `⚠️ 分析失败：${err}` }); }
+    );
+  } catch {
+    store.updateChatMessage(feedbackId, { content: '' });
+  }
+}
+
+/** 解析本轮 AI 回复中的新指令，执行它们，然后递归调用 runAgenticLoop */
+async function continueAgenticLoop(
+  userRequest: string,
+  conversationHistory: Array<{ role: 'user' | 'assistant'; content: string }>,
+  reply: string,
+  preExecMsgCount: number,
+  apiKey: string,
+  authToken: string,
+  loopCtx: AgenticLoopContext,
+  previousRound: number
+): Promise<void> {
+  // 检查 AI 是否明确标记完成
+  if (reply.includes('[DONE]')) return;
+
+  // 解析新指令
+  const newOsmCommands = parseOSMCommands(reply);
+  const newAnalysisCommands = parseAnalysisCommands(reply);
+  const newQueryCommands = parseQueryCommands(reply);
+  const newRouteCommands = parseRouteCommands(reply);
+
+  const hasNewCommands = newOsmCommands.length > 0 || newAnalysisCommands.length > 0
+    || newQueryCommands.length > 0 || newRouteCommands.length > 0;
+
+  if (!hasNewCommands) return; // 无新指令，AI 只是在总结，停止
+
+  const preCount = useGISStore.getState().chatMessages.length;
+  const osmExecResults: Array<{ key: string; label?: string; geojson?: FeatureCollection | null; description?: string; error?: string }> = [];
+
+  // 执行新的 OSM 命令
+  for (let i = 0; i < newOsmCommands.length; i++) {
+    const cmd = newOsmCommands[i];
+    const cmdKey = `agentic-osm-${Date.now()}-${i}`;
+    try {
+      const { osmResult } = await executeOSMCommandWrapper(cmd, cmdKey);
+      if (osmResult) {
+        osmExecResults.push({ key: cmdKey, label: osmResult.label, geojson: osmResult.geojson, description: osmResult.description, error: osmResult.error });
+      }
+    } catch { /* single command failure shouldn't stop the loop */ }
+  }
+
+  // 执行新的 ANALYSIS 命令
+  for (let i = 0; i < newAnalysisCommands.length; i++) {
+    const aCmd = newAnalysisCommands[i];
+    try {
+      const result = await executeAnalysisCommand(aCmd);
+      useGISStore.getState().addChatMessage({
+        id: `agentic-analysis-${Date.now()}-${i}`,
+        role: 'assistant',
+        content: `🔬 **空间分析**: ${result.description}`,
+        timestamp: Date.now(),
+      });
+    } catch { /* continue */ }
+  }
+
+  // 执行新的 QUERY 命令
+  for (let i = 0; i < newQueryCommands.length; i++) {
+    const qCmd = newQueryCommands[i];
+    try {
+      const result = await executeQueryCommand(qCmd);
+      useGISStore.getState().addChatMessage({
+        id: `agentic-query-${Date.now()}-${i}`,
+        role: 'assistant',
+        content: `🔍 **数据筛选**: ${result.description}`,
+        timestamp: Date.now(),
+      });
+    } catch { /* continue */ }
+  }
+
+  // 收集本轮新增结果
+  const newMessages = useGISStore.getState().chatMessages.slice(preCount);
+  const osmResultsRecord: Record<string, { label?: string; geojson?: FeatureCollection | null; description?: string; error?: string }> = {};
+  for (const r of osmExecResults) {
+    osmResultsRecord[r.key] = { label: r.label, geojson: r.geojson, description: r.description, error: r.error };
+  }
+  const newToolResults = collectToolResults(newMessages, osmResultsRecord);
+
+  // 更新 AI 回复到对话历史
+  const updatedHistory = [
+    ...conversationHistory,
+    { role: 'assistant' as const, content: reply },
+  ];
+
+  // 递归：继续下一轮
+  if (newToolResults.length > 0) {
+    await runAgenticLoop(userRequest, updatedHistory, newToolResults, preCount, apiKey, authToken, loopCtx, previousRound + 1);
+  }
+}
+
+/** 构建空间上下文（静态版本，可从外部调用） */
+function buildSpatialContextStatic(store: ReturnType<typeof useGISStore.getState>): string {
+  const parts: string[] = [];
+  const { mapState, layers } = store;
+  parts.push(`地图中心: [${mapState.center[0].toFixed(6)}, ${mapState.center[1].toFixed(6)}]`);
+  parts.push(`缩放级别: ${mapState.zoom.toFixed(1)}`);
+  if (mapState.bounds) {
+    const [w, s, e, n] = mapState.bounds;
+    parts.push(`视野范围(WGS84): [${w.toFixed(6)}, ${s.toFixed(6)}] 到 [${e.toFixed(6)}, ${n.toFixed(6)}]`);
+    const latMid = (s + n) / 2;
+    const degToKm = 111.32 * Math.cos((latMid * Math.PI) / 180);
+    parts.push(`视野约 ${((e - w) * degToKm).toFixed(1)}km × ${((n - s) * 111.32).toFixed(1)}km`);
+  }
+  const visibleLayers = layers.filter((l) => l.visible && l.data);
+  if (visibleLayers.length > 0) {
+    parts.push(`可见图层 (共${visibleLayers.length}个):`);
+    for (const l of visibleLayers) {
+      const geomTypes = new Set(l.data?.features?.map(f => f.geometry?.type) || []);
+      parts.push(`  · "${l.name}" — 类型:${l.type} | 几何:${[...geomTypes].join(',') || '无'} | ${l.data?.features?.length || 0}个要素`);
+    }
+  }
+  return parts.join('\n');
+}
+
+/** OSM 命令执行包装器（用于 agentic 循环） */
+async function executeOSMCommandWrapper(
+  cmd: ReturnType<typeof parseOSMCommands>[0],
+  cmdKey: string
+): Promise<{ osmResult: { label?: string; geojson?: FeatureCollection | null; description?: string; error?: string } | null }> {
+  const store = useGISStore.getState();
+  try {
+    const { result, bbox } = await executeOSMCommand(cmd, store.mapState.bounds);
+    if (result.geojson && result.geojson.features.length > 0) {
+      const colors = ['#1677ff', '#52c41a', '#fa8c16', '#f5222d', '#722ed1', '#13c2c2'];
+      store.addLayer({
+        id: '', name: `${result.label}_${new Date().toLocaleTimeString()}`, type: 'geojson', visible: true,
+        color: colors[Math.floor(Math.random() * colors.length)], opacity: 0.6,
+        data: result.geojson, sourceId: '', layerId: '', createdAt: Date.now(),
+      });
+    }
+    return {
+      osmResult: { label: result.label, geojson: result.geojson, description: result.description, error: (result as any).error }
+    };
+  } catch (err) {
+    return {
+      osmResult: { label: cmd.params, geojson: null, description: '查询异常', error: err instanceof Error ? err.message : '未知错误' }
+    };
+  }
+}
+
 // ====== Component ======
 
 const AIAssistant: React.FC = () => {
@@ -1923,72 +2138,32 @@ ${text}`;
       }
 
       // ============================================
-      // 🔄 工具反馈循环：异步执行，不阻塞主流程
+      // 🤖 Agentic GIS — AI 自主多步分析循环
+      // AI 规划链路 → 执行 → 看中间结果 → 继续 → 直到完成
       // ============================================
       const hadCommands = osmCommands.length > 0 || analysisCommands.length > 0
         || routeCommands.length > 0 || hazardCommands.length > 0 || localFiles.length > 0
         || queryCommands.length > 0;
 
       if (hadCommands) {
-        // 收集执行数据（从闭包中捕获，供异步回调使用）
         const currentMessages = useGISStore.getState().chatMessages;
         const newMessages = currentMessages.slice(preExecMsgCount);
         const osmResultsRecord: Record<string, { label?: string; geojson?: FeatureCollection | null; description?: string; error?: string }> = {};
         for (const r of osmExecutionResults) {
-          osmResultsRecord[r.key] = {
-            label: r.label,
-            geojson: r.geojson,
-            description: r.description,
-            error: r.error,
-          };
+          osmResultsRecord[r.key] = { label: r.label, geojson: r.geojson, description: r.description, error: r.error };
         }
-        const toolResults = collectToolResults(newMessages, osmResultsRecord);
+        const initialToolResults = collectToolResults(newMessages, osmResultsRecord);
+        const capturedAuthToken = authToken;
+        const capturedApiKey = deepseekApiKey;
 
-        if (toolResults.length > 0) {
-          const feedbackText = formatToolResultsForAI(toolResults);
-          const feedbackSpatialContext = buildSpatialContext();
-          const feedbackUserContent = buildFeedbackUserContent(text, feedbackText, feedbackSpatialContext);
-          const feedbackMessages = [
-            { role: 'system' as const, content: FEEDBACK_SYSTEM_PROMPT },
-            ...history,
-            { role: 'user' as const, content: feedbackUserContent },
-          ];
-
-          // 🔥 异步执行反馈轮，不阻塞主流程！
-          // 用户先看到第一轮结果 + 指令执行卡片，反馈总结稍后追加
-          const capturedAuthToken = authToken;
-          const capturedApiKey = deepseekApiKey;
-          setTimeout(async () => {
-            const feedbackId = `assistant-feedback-${Date.now()}`;
-            const feedbackPlaceholder: ChatMessage = {
-              id: feedbackId,
-              role: 'assistant',
-              content: '⏳ 正在分析结果...',
-              timestamp: Date.now(),
-            };
-            useGISStore.getState().addChatMessage(feedbackPlaceholder);
-
-            let feedbackReply = '';
-            try {
-              await chatWithDeepSeekStream(
-                feedbackMessages,
-                { apiKey: capturedApiKey, authToken: capturedAuthToken },
-                (chunk) => {
-                  feedbackReply += chunk;
-                  useGISStore.getState().updateChatMessage(feedbackId, { content: feedbackReply });
-                },
-                () => {
-                  useGISStore.getState().updateChatMessage(feedbackId, { content: feedbackReply || '(无回复)' });
-                },
-                (err) => {
-                  useGISStore.getState().updateChatMessage(feedbackId, { content: `⚠️ 结果总结失败：${err}` });
-                }
-              );
-            } catch {
-              useGISStore.getState().updateChatMessage(feedbackId, { content: '' });
-            }
-          }, 100); // 延迟 100ms，让主流程先渲染完成
-        }
+        // 🔥 Agentic 异步循环，不阻塞主流程
+        setTimeout(async () => {
+          await runAgenticLoop(
+            text, history, initialToolResults, preExecMsgCount,
+            capturedApiKey, capturedAuthToken,
+            { osmExecutionResults, msgId }
+          );
+        }, 100);
       }
     } catch (err) {
       addChatMessage({
