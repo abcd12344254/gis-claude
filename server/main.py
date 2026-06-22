@@ -177,6 +177,7 @@ async def health_check():
         "turso_env_set": turso_configured,
         "db_path": DB_PATH[:60] + "..." if len(DB_PATH) > 60 else DB_PATH,
         "user_count": user_count,
+        "db": "Turso Cloud",
     }
 
 
