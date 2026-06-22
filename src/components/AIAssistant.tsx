@@ -26,6 +26,7 @@ import {
   DownloadOutlined,
   DatabaseOutlined,
   GlobalOutlined,
+  CameraOutlined,
 } from '@ant-design/icons';
 import { useGISStore } from '../store/useGISStore';
 import { useIsMobile } from '../hooks/useIsMobile';
@@ -53,6 +54,10 @@ import {
   measureArea,
   createGrid,
   pointDensityAnalysis,
+  clusterDBSCAN,
+  kernelDensityEstimation,
+  interpolateIDW,
+  zonalStatistics,
 } from '../services/spatialAnalysis';
 import { applyClassification, COLOR_RAMPS, findNumericFields } from '../services/classification';
 import type { ChatMessage } from '../types';
@@ -63,6 +68,9 @@ import { planRoute, getRouteBounds } from '../services/routingService';
 import type { RouteResult, TravelMode } from '../services/routingService';
 import { queryEarthquakes, sampleElevationGrid, generateElevationPoints, generateElevationLabels, queryWeather, generateContours } from '../services/hazardService';
 import { flattenCoords, getFCBounds } from '../utils/geo';
+import { collectToolResults, formatToolResultsForAI, buildFeedbackUserContent, extractSuggestedActions, FEEDBACK_SYSTEM_PROMPT } from '../services/toolFeedback';
+import { captureMapScreenshot, analyzeMapWithVision, buildVisionPrompt } from '../services/visionService';
+import { parseNLQuery, executeQuery, getQueryableFields } from '../services/nlQuery';
 
 const { Text } = Typography;
 
@@ -166,10 +174,26 @@ const GEOJSON_INSTRUCTION = `
 [ANALYSIS:density:图层名]          — 点密度分析
 [ANALYSIS:distance:图层名]         — 计算点距离
 [ANALYSIS:classify:图层名:字段]    — 分层着色（按数值字段分级。⚠️ 字段名必须来自上方[当前地图状态]中该图层的"数值字段"列表！字段不存在会失败）
+[ANALYSIS:dbscan:图层名:1.0]      — DBSCAN 点聚类（eps=1km, minPts=3。点图层使用）
+[ANALYSIS:kde:图层名:1.0]         — 核密度估计（带宽1km，生成热力格网。点图层使用）
+[ANALYSIS:idw:图层名:字段:0.01]   — IDW空间插值（对数值字段做反距离加权插值。点图层使用）
+[ANALYSIS:zonal:区域图层|点图层:字段] — 分区统计（统计每个区域内点的数值字段：计数/求和/均值/最大/最小/标准差）
 \`\`\`
+
+### 数据筛选指令
+\`\`\`
+[QUERY:图层名:自然语言条件]       — 从图层中筛选要素
+\`\`\`
+支持的自然语言条件：
+  ·"人口大于100万" / "面积小于50"  — 数值比较（自动匹配字段）
+  ·"名称包含武汉"                   — 字符串包含
+  ·"GDP最高的5个"                   — Top-N 排序
+  ·"鄱阳湖"                         — 全字段关键词搜索
+筛选结果会作为新图层（粉色）加载。字段名自动模糊匹配。
 
 ⚠️ 图层名用模糊匹配（如"武汉市"可匹配"武汉市(地级市)_14:30:25"）
    半径默认单位是 km，支持 m 后缀（如 500m）
+   dbscan/kde/idw 只对点图层有效；zonal 需要双图层（面+点）
    分析结果会自动加载为新图层！
 
 ### 本地文件加载指令
@@ -795,6 +819,66 @@ async function executeAnalysisCommand(
         };
       }
 
+      case 'dbscan': {
+        if (!fc) throw new Error('图层无数据');
+        const eps = typeof cmd.param === 'number' ? cmd.param : 1;
+        const minPts = cmd.secondLayerRef ? parseInt(cmd.secondLayerRef) : 3;
+        const r = clusterDBSCAN(fc, eps, minPts);
+        if (r.result) {
+          addLayer({
+            id: '', name: `${sourceName}_DBSCAN`, type: 'geojson', visible: true,
+            color: sourceColor, opacity: 0.8, data: r.result as FeatureCollection, sourceId: '', layerId: '', createdAt: Date.now(),
+          });
+        }
+        return { description: r.description, geojson: r.result as FeatureCollection | null };
+      }
+
+      case 'kde': {
+        if (!fc) throw new Error('图层无数据');
+        const bandwidth = typeof cmd.param === 'number' ? cmd.param : 1;
+        const r = kernelDensityEstimation(fc, bandwidth);
+        if (r.result) {
+          addLayer({
+            id: '', name: `${sourceName}_KDE热力图`, type: 'geojson', visible: true,
+            color: '#ff4d4f', opacity: 0.6, data: r.result as FeatureCollection, sourceId: '', layerId: '', createdAt: Date.now(),
+          });
+        }
+        return { description: r.description, geojson: r.result as FeatureCollection | null };
+      }
+
+      case 'idw': {
+        if (!fc) throw new Error('图层无数据');
+        const field = typeof cmd.param === 'string' ? cmd.param : '';
+        if (!field) return { description: '❌ IDW 需要指定数值字段。用法: [ANALYSIS:idw:图层名:字段]', geojson: null };
+        const r = interpolateIDW(fc, field);
+        if (r.result) {
+          addLayer({
+            id: '', name: `${sourceName}_IDW(${field})`, type: 'geojson', visible: true,
+            color: '#722ed1', opacity: 0.6, data: r.result as FeatureCollection, sourceId: '', layerId: '', createdAt: Date.now(),
+          });
+        }
+        return { description: r.description, geojson: r.result as FeatureCollection | null };
+      }
+
+      case 'zonal': {
+        if (!fc) throw new Error('区域图层无数据');
+        // 双图层：fc = 区域面，secondLayer = 点数据
+        const pointLayerId = cmd.secondLayerRef ? findLayerByName(cmd.secondLayerRef) : null;
+        if (!pointLayerId) return { description: '❌ 分区统计需要第二个图层（点数据）。用法: [ANALYSIS:zonal:区域图层|点图层:字段]', geojson: null };
+        const pointLayer = currentLayers.find(l => l.id === pointLayerId);
+        if (!pointLayer?.data) return { description: `❌ 未找到点数据图层"${cmd.secondLayerRef}"`, geojson: null };
+        const field = typeof cmd.param === 'string' ? cmd.param : '';
+        if (!field) return { description: '❌ 分区统计需要指定数值字段。用法: [ANALYSIS:zonal:区域图层|点图层:population]', geojson: null };
+        const r = zonalStatistics(fc, pointLayer.data, field);
+        if (r.result) {
+          addLayer({
+            id: '', name: `${sourceName}_分区统计(${field})`, type: 'geojson', visible: true,
+            color: sourceColor, opacity: 0.5, data: r.result as FeatureCollection, sourceId: '', layerId: '', createdAt: Date.now(),
+          });
+        }
+        return { description: r.description, geojson: r.result as FeatureCollection | null };
+      }
+
       default:
         return { description: `❌ 未知分析操作: ${cmd.operation}`, geojson: null };
     }
@@ -895,6 +979,55 @@ function parseRouteCommands(text: string): RouteCommand[] {
     cmds.push({ from, to, mode });
   }
   return cmds;
+}
+
+// ====== QUERY 自然语言筛选指令 ======
+
+interface QueryCommand {
+  layerRef: string;
+  condition: string;
+}
+
+function parseQueryCommands(text: string): QueryCommand[] {
+  const cmds: QueryCommand[] = [];
+  const regex = /\[QUERY:([^:]+):([^\]]+)\]/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) {
+    cmds.push({ layerRef: match[1].trim(), condition: match[2].trim() });
+  }
+  return cmds;
+}
+
+async function executeQueryCommand(
+  cmd: QueryCommand
+): Promise<{ description: string; geojson: FeatureCollection | null }> {
+  const store = useGISStore.getState();
+  const layerId = findLayerByName(cmd.layerRef);
+  if (!layerId) {
+    const available = store.layers.filter(l => l.visible && l.data).map(l => `"${l.name}"`).join(', ') || '无';
+    return { description: `❌ 未找到图层"${cmd.layerRef}"。可用: ${available}`, geojson: null };
+  }
+
+  const layer = store.layers.find(l => l.id === layerId);
+  if (!layer?.data) return { description: `❌ 图层"${layer?.name || cmd.layerRef}"无数据`, geojson: null };
+
+  const fields = getQueryableFields(layer.data);
+  const condition = parseNLQuery(cmd.condition, fields);
+  if (!condition) {
+    return { description: `❌ 无法理解筛选条件"${cmd.condition}"。可用字段: ${fields.slice(0, 8).join(', ')}`, geojson: null };
+  }
+
+  const result = executeQuery(layer.data, condition);
+
+  // 成功时添加为新的筛选图层
+  if (result.result && result.result.features.length > 0) {
+    store.addLayer({
+      id: '', name: `${layer.name}_筛选:${cmd.condition}`, type: 'geojson', visible: true,
+      color: '#eb2f96', opacity: 0.8, data: result.result, sourceId: '', layerId: '', createdAt: Date.now(),
+    });
+  }
+
+  return { description: result.description, geojson: result.result };
 }
 
 // ====== HAZARD 灾害数据指令 ======
@@ -1311,13 +1444,13 @@ const AIAssistant: React.FC = () => {
     return parts.join('\n');
   }, [mapState, layers]);
 
-  /** 执行单个 OSM 命令，可选传入前一个 boundary 命令产出的精确 bbox */
+  /** 执行单个 OSM 命令，返回 { bbox, osmResult } */
   const runOSMCommand = useCallback(
     async (
       cmd: OSMCommand,
       cmdKey: string,
       overrideBounds?: [number, number, number, number] | null
-    ): Promise<[number, number, number, number] | null> => {
+    ): Promise<{ bbox: [number, number, number, number] | null; osmResult: OSMQueryResult | null }> => {
       setOsmLoading((prev) => ({ ...prev, [cmdKey]: true }));
       try {
         const { result, bbox } = await executeOSMCommand(cmd, mapState.bounds, overrideBounds);
@@ -1344,20 +1477,21 @@ const AIAssistant: React.FC = () => {
           message.warning(result.error ? `查询失败: ${result.error}` : result.description);
         }
 
-        // 返回 boundary 命令产出的精确 bbox，供后续命令链接使用
-        return bbox ?? null;
+        // 返回 boundary 命令产出的精确 bbox + OSM 结果
+        return { bbox: bbox ?? null, osmResult: result };
       } catch (err) {
+        const errResult: OSMQueryResult = {
+          type: 'custom',
+          label: '错误',
+          geojson: null,
+          description: '查询异常',
+          error: err instanceof Error ? err.message : '未知错误',
+        };
         setOsmResults((prev) => ({
           ...prev,
-          [cmdKey]: {
-            type: 'custom',
-            label: '错误',
-            geojson: null,
-            description: '查询异常',
-            error: err instanceof Error ? err.message : '未知错误',
-          },
+          [cmdKey]: errResult,
         }));
-        return null;
+        return { bbox: null, osmResult: errResult };
       } finally {
         setOsmLoading((prev) => ({ ...prev, [cmdKey]: false }));
       }
@@ -1418,6 +1552,50 @@ const AIAssistant: React.FC = () => {
     }
   }, []);
 
+  /** 截图发给 AI 分析 */
+  const handleVisionAnalyze = useCallback(async () => {
+    if (isChatLoading || !user) return;
+
+    const screenshot = captureMapScreenshot();
+    if (!screenshot) {
+      message.error('无法截取地图，请确认地图已加载');
+      return;
+    }
+
+    const prompt = buildVisionPrompt(inputValue.trim() || undefined);
+    setInputValue('');
+    setChatLoading(true);
+
+    const msgId = `assistant-vision-${Date.now()}`;
+    const placeholderMsg: ChatMessage = {
+      id: msgId,
+      role: 'assistant',
+      content: '📸 正在分析地图截图...',
+      timestamp: Date.now(),
+    };
+    addChatMessage(placeholderMsg);
+
+    let fullReply = '';
+    await analyzeMapWithVision(
+      screenshot,
+      prompt,
+      { apiKey: deepseekApiKey, authToken },
+      (chunk) => {
+        fullReply += chunk;
+        useGISStore.getState().updateChatMessage(msgId, { content: fullReply });
+      },
+      () => {
+        const finalContent = fullReply || 'AI 未返回视觉分析结果';
+        useGISStore.getState().updateChatMessage(msgId, { content: finalContent });
+      },
+      (err) => {
+        useGISStore.getState().updateChatMessage(msgId, { content: `📸 视觉分析失败：${err}` });
+      }
+    );
+
+    setChatLoading(false);
+  }, [isChatLoading, user, inputValue, authToken, addChatMessage, setChatLoading, setInputValue]);
+
   const handleSend = useCallback(async () => {
     const text = inputValue.trim();
     if (!text || isChatLoading) return;
@@ -1445,9 +1623,16 @@ const AIAssistant: React.FC = () => {
     setChatLoading(true);
 
     try {
+      // 对话历史：保留最近 20 条有效消息，过滤掉占位/反馈/系统消息
       const history = chatMessages
-        .slice(-10)
-        .filter((m) => m.id !== 'welcome')
+        .filter((m) => {
+          if (m.id === 'welcome') return false;
+          if (m.id.startsWith('assistant-feedback-')) return false; // 反馈轮总结 → 不占上下文
+          if (m.content === '⏳ 思考中...' || m.content.startsWith('⏳ 正在分析执行结果')) return false; // 占位消息
+          if (m.role === 'system') return false;
+          return m.role === 'user' || m.role === 'assistant';
+        })
+        .slice(-20)
         .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }));
 
       const enrichedContent = `[当前地图状态]
@@ -1493,10 +1678,20 @@ ${text}`;
         return;
       }
 
+      // 🔍 调试日志：输出 AI 原始回复，方便排查幻觉问题
+      console.group('%c🤖 AI 原始回复', 'color: #1677ff; font-weight: bold');
+      console.log(fullReply);
+      console.groupEnd();
+
       // ============================================
       // 🔄 执行顺序：ROUTE → LOCAL → OSM → ANALYSIS → MAP
       // ROUTE 最先执行，避免 OSM 边界查询跳动地图干扰路线规划
       // ============================================
+
+      // 📸 快照：记录执行前的消息数，后续收集新增消息作为工具执行结果
+      const preExecMsgCount = useGISStore.getState().chatMessages.length;
+      // 🗃️ 本地收集器：跟踪本轮 OSM 执行结果（避免 React 状态闭包延迟问题）
+      const osmExecutionResults: Array<{ key: string; label?: string; geojson?: FeatureCollection | null; description?: string; error?: string }> = [];
 
       // 1️⃣ 解析并执行 ROUTE 路径规划指令（最先，不被 OSM 跳图干扰）
       const routeCommands = parseRouteCommands(fullReply);
@@ -1535,6 +1730,29 @@ ${text}`;
       let osmCommands: OSMCommand[] = [];
       if (routeCommands.length === 0) {
         osmCommands = parseOSMCommands(fullReply);
+
+        // 🛡️ 幻觉过滤：移除与用户输入明显无关的 OSM 命令
+        // 防止 AI 在回复中顺嘴提到其他地名时被误解析为指令
+        const userTokens = new Set(tokenize(text.toLowerCase(), 2, 4));
+        const spatialTokens = new Set(tokenize(
+          layers.filter(l => l.visible).map(l => l.name).join(' ').toLowerCase(),
+          2, 4
+        ));
+        const allRelevantTokens = new Set([...userTokens, ...spatialTokens]);
+        const filteredOsmCommands: OSMCommand[] = [];
+        for (const cmd of osmCommands) {
+          const cmdTokens = tokenize(cmd.params.toLowerCase(), 2, 4);
+          const hasOverlap = cmdTokens.some(t => allRelevantTokens.has(t));
+          if (hasOverlap || cmd.params.length === 0) {
+            filteredOsmCommands.push(cmd);
+          } else {
+            console.warn(`🛡️ 幻觉过滤: 跳过无关指令 [OSM:${cmd.action}:${cmd.params}]（与用户输入和当前图层无关联）`);
+          }
+        }
+        if (filteredOsmCommands.length < osmCommands.length) {
+          console.log(`🛡️ 过滤了 ${osmCommands.length - filteredOsmCommands.length} 条可能为幻觉的 OSM 指令`);
+          osmCommands = filteredOsmCommands;
+        }
 
         // 🔒 安全网1：AI 忘记生成 OSM 指令时自动补偿
         if (osmCommands.length === 0 && looksLikeGeoQuery(text) && !hasLocalData) {
@@ -1584,7 +1802,17 @@ ${text}`;
         for (let i = 0; i < osmCommands.length; i++) {
           const cmd = osmCommands[i];
           const cmdKey = `${msgId}-osm-${i}`;
-          const newBbox = await runOSMCommand(cmd, cmdKey, chainedBbox);
+          const { bbox: newBbox, osmResult } = await runOSMCommand(cmd, cmdKey, chainedBbox);
+          // 收集 OSM 执行结果到本地收集器
+          if (osmResult) {
+            osmExecutionResults.push({
+              key: cmdKey,
+              label: osmResult.label,
+              geojson: osmResult.geojson,
+              description: osmResult.description,
+              error: osmResult.error,
+            });
+          }
           if (cmd.action === 'boundary' && newBbox) {
             chainedBbox = newBbox;
           }
@@ -1650,6 +1878,21 @@ ${text}`;
         }
       }
 
+      // 4️⃣.5 解析并执行 QUERY 自然语言筛选指令
+      const queryCommands = parseQueryCommands(fullReply);
+      if (queryCommands.length > 0) {
+        for (let i = 0; i < queryCommands.length; i++) {
+          const qCmd = queryCommands[i];
+          const result = await executeQueryCommand(qCmd);
+          addChatMessage({
+            id: `query-${Date.now()}-${i}`,
+            role: 'assistant',
+            content: `🔍 **数据筛选**: ${result.description}`,
+            timestamp: Date.now(),
+          });
+        }
+      }
+
       // 5️⃣ 解析并执行 HAZARD 灾害数据指令
       const hazardCommands = parseHazardCommands(fullReply);
       if (hazardCommands.length > 0) {
@@ -1677,6 +1920,75 @@ ${text}`;
       const mapActions = extractMapActions(fullReply);
       if (osmCommands.length === 0 && analysisCommands.length === 0 && mapActions.length === 1 && mapActions[0].action === 'zoomTo') {
         setTimeout(() => executeMapAction(mapActions[0]), 500);
+      }
+
+      // ============================================
+      // 🔄 工具反馈循环：异步执行，不阻塞主流程
+      // ============================================
+      const hadCommands = osmCommands.length > 0 || analysisCommands.length > 0
+        || routeCommands.length > 0 || hazardCommands.length > 0 || localFiles.length > 0
+        || queryCommands.length > 0;
+
+      if (hadCommands) {
+        // 收集执行数据（从闭包中捕获，供异步回调使用）
+        const currentMessages = useGISStore.getState().chatMessages;
+        const newMessages = currentMessages.slice(preExecMsgCount);
+        const osmResultsRecord: Record<string, { label?: string; geojson?: FeatureCollection | null; description?: string; error?: string }> = {};
+        for (const r of osmExecutionResults) {
+          osmResultsRecord[r.key] = {
+            label: r.label,
+            geojson: r.geojson,
+            description: r.description,
+            error: r.error,
+          };
+        }
+        const toolResults = collectToolResults(newMessages, osmResultsRecord);
+
+        if (toolResults.length > 0) {
+          const feedbackText = formatToolResultsForAI(toolResults);
+          const feedbackSpatialContext = buildSpatialContext();
+          const feedbackUserContent = buildFeedbackUserContent(text, feedbackText, feedbackSpatialContext);
+          const feedbackMessages = [
+            { role: 'system' as const, content: FEEDBACK_SYSTEM_PROMPT },
+            ...history,
+            { role: 'user' as const, content: feedbackUserContent },
+          ];
+
+          // 🔥 异步执行反馈轮，不阻塞主流程！
+          // 用户先看到第一轮结果 + 指令执行卡片，反馈总结稍后追加
+          const capturedAuthToken = authToken;
+          const capturedApiKey = deepseekApiKey;
+          setTimeout(async () => {
+            const feedbackId = `assistant-feedback-${Date.now()}`;
+            const feedbackPlaceholder: ChatMessage = {
+              id: feedbackId,
+              role: 'assistant',
+              content: '⏳ 正在分析结果...',
+              timestamp: Date.now(),
+            };
+            useGISStore.getState().addChatMessage(feedbackPlaceholder);
+
+            let feedbackReply = '';
+            try {
+              await chatWithDeepSeekStream(
+                feedbackMessages,
+                { apiKey: capturedApiKey, authToken: capturedAuthToken },
+                (chunk) => {
+                  feedbackReply += chunk;
+                  useGISStore.getState().updateChatMessage(feedbackId, { content: feedbackReply });
+                },
+                () => {
+                  useGISStore.getState().updateChatMessage(feedbackId, { content: feedbackReply || '(无回复)' });
+                },
+                (err) => {
+                  useGISStore.getState().updateChatMessage(feedbackId, { content: `⚠️ 结果总结失败：${err}` });
+                }
+              );
+            } catch {
+              useGISStore.getState().updateChatMessage(feedbackId, { content: '' });
+            }
+          }, 100); // 延迟 100ms，让主流程先渲染完成
+        }
       }
     } catch (err) {
       addChatMessage({
@@ -1942,6 +2254,43 @@ ${text}`;
               <Text type="secondary" style={{ fontSize: 10, marginTop: 2, padding: '0 4px' }}>
                 {new Date(msg.timestamp).toLocaleTimeString()}
               </Text>
+
+              {/* 快捷操作芯片 — AI 回复中的建议直接点击 */}
+              {msg.role === 'assistant' && !msg.content.startsWith('❌') && !msg.content.startsWith('⏳') && (
+                (() => {
+                  const actions = extractSuggestedActions(msg.content);
+                  if (actions.length === 0) return null;
+                  return (
+                    <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {actions.map((action, i) => (
+                        <Button
+                          key={i}
+                          size="small"
+                          style={{
+                            borderRadius: 20, fontSize: 12,
+                            background: '#fff', border: '1px solid #d9d9d9',
+                            color: '#1677ff', cursor: 'pointer',
+                          }}
+                          onClick={() => {
+                            setInputValue(action);
+                            // 不自动发送，让用户确认
+                          }}
+                          onMouseEnter={(e) => {
+                            (e.target as HTMLElement).style.background = '#e6f4ff';
+                            (e.target as HTMLElement).style.borderColor = '#1677ff';
+                          }}
+                          onMouseLeave={(e) => {
+                            (e.target as HTMLElement).style.background = '#fff';
+                            (e.target as HTMLElement).style.borderColor = '#d9d9d9';
+                          }}
+                        >
+                          {action}
+                        </Button>
+                      ))}
+                    </div>
+                  );
+                })()
+              )}
             </div>
           );
         })}
@@ -1998,6 +2347,16 @@ ${text}`;
             disabled={!user}
             style={{ flex: 1, borderRadius: 8 }}
           />
+          <Tooltip title="📸 截图分析 — 截取当前地图发给 AI 做视觉分析">
+            <Button
+              icon={<CameraOutlined />}
+              onClick={handleVisionAnalyze}
+              loading={isChatLoading}
+              disabled={!user}
+              size={isMobile ? 'middle' : undefined}
+              style={{ borderRadius: 8, minWidth: isMobile ? 48 : undefined, color: '#722ed1', borderColor: '#d3adf7' }}
+            />
+          </Tooltip>
           <Button type="primary" icon={<SendOutlined />} onClick={handleSend} loading={isChatLoading} disabled={!inputValue.trim() || !user} size={isMobile ? 'middle' : undefined} style={{ borderRadius: 8, minWidth: isMobile ? 48 : undefined }}>
             {isMobile ? '' : '发送'}
           </Button>

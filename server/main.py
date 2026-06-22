@@ -600,6 +600,91 @@ async def chat_stream(
     )
 
 
+# ====== 地图视觉分析 ======
+
+class VisionRequest(BaseModel):
+    image: str       # base64 data:image/png;...
+    prompt: str      # 用户输入的提示词
+
+@app.post("/api/vision")
+async def vision_analyze(
+    req: VisionRequest,
+    user: dict = Depends(get_current_user),
+):
+    """地图截图视觉分析 — SSE 流式返回（需要登录）"""
+    api_key = DEEPSEEK_API_KEY
+    if not api_key:
+        raise HTTPException(status_code=501, detail="服务端 API Key 未配置")
+
+    remaining = reset_daily_quota_if_needed(user)
+    if remaining <= 0:
+        raise HTTPException(status_code=429, detail="今日配额已用完")
+
+    _check_rate_limit(user["id"])
+
+    # 构建视觉消息：图片 + 文本
+    vision_messages = [{
+        "role": "user",
+        "content": [
+            {"type": "image_url", "image_url": {"url": req.image}},
+            {"type": "text", "text": req.prompt},
+        ]
+    }]
+
+    async def event_stream():
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                async with client.stream(
+                    "POST",
+                    DEEPSEEK_API_URL,
+                    json={
+                        "model": "deepseek-chat",
+                        "messages": vision_messages,
+                        "temperature": 0.7,
+                        "max_tokens": 2048,
+                        "stream": True,
+                    },
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {api_key}",
+                    },
+                ) as response:
+                    if response.status_code != 200:
+                        error_text = await response.aread()
+                        yield f"event: error\ndata: DeepSeek Vision API error ({response.status_code}): {error_text.decode()[:200]}\n\n"
+                        return
+
+                    async for line in response.aiter_lines():
+                        if line.startswith("data: "):
+                            data = line[6:]
+                            if data == "[DONE]":
+                                yield "event: done\ndata: [DONE]\n\n"
+                                break
+                            try:
+                                chunk = json.loads(data)
+                                delta = chunk.get("choices", [{}])[0].get("delta", {})
+                                content = delta.get("content", "")
+                                if content:
+                                    yield f"data: {json.dumps({'content': content})}\n\n"
+                            except json.JSONDecodeError:
+                                pass
+        except Exception as e:
+            yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+
+        if user:
+            increment_quota(user["id"])
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 # ====== OSM 数据代理 ======
 
 @app.get("/api/osm/nominatim/search")

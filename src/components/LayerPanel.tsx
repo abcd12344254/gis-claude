@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useRef } from 'react';
 import {
   List,
   Button,
@@ -13,7 +13,6 @@ import {
   Empty,
   Dropdown,
   Tooltip,
-  Select,
 } from 'antd';
 import type { MenuProps } from 'antd';
 import {
@@ -30,8 +29,6 @@ import { useGISStore } from '../store/useGISStore';
 import { useIsMobile } from '../hooks/useIsMobile';
 import type { FeatureCollection } from 'geojson';
 import { getFCBounds } from '../utils/geo';
-import { applyClassification, COLOR_RAMPS, findNumericFields } from '../services/classification';
-import type { ClassifyResult } from '../services/classification';
 
 const { Text } = Typography;
 
@@ -49,39 +46,6 @@ const LayerPanel: React.FC = () => {
     useGISStore();
 
   const isMobile = useIsMobile();
-
-  // 分类着色状态
-  const [classifyLayerId, setClassifyLayerId] = useState<string | null>(null);
-  const [classifyField, setClassifyField] = useState<string | null>(null);
-  const [classifyRamp, setClassifyRamp] = useState('blues');
-  const classifyLayer = layers.find(l => l.id === classifyLayerId);
-  const numFields = classifyLayer?.data ? findNumericFields(classifyLayer.data) : [];
-  const [classifyResult, setClassifyResult] = useState<ClassifyResult | null>(null);
-
-  const handleApplyClassify = useCallback(() => {
-    if (!classifyLayer?.data || !classifyField) return;
-    const { geojson, result } = applyClassification(classifyLayer.data, classifyField, classifyRamp);
-    updateLayer(classifyLayer.id, { data: geojson });
-    setClassifyResult(result);
-  }, [classifyLayer, classifyField, classifyRamp, updateLayer]);
-
-  const handleClearClassify = useCallback(() => {
-    if (!classifyLayer?.data) return;
-    // 清除所有 _classify 属性
-    const cleaned: FeatureCollection = {
-      type: 'FeatureCollection',
-      features: classifyLayer.data.features.map(f => {
-        const props = { ...(f.properties as any) };
-        delete props._classifyColor;
-        delete props._classifyValue;
-        delete props._classifyIndex;
-        return { ...f, properties: props };
-      }),
-    };
-    updateLayer(classifyLayer.id, { data: cleaned });
-    setClassifyResult(null);
-    setClassifyField(null);
-  }, [classifyLayer, updateLayer]);
 
   const handleFileUpload = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -400,93 +364,6 @@ const LayerPanel: React.FC = () => {
         />
       )}
 
-      {/* ====== 分层着色 ====== */}
-      {layers.filter(l => l.visible && l.data).length > 0 && (
-        <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid #f0f0f0' }}>
-          <Text strong style={{ fontSize: 13, display: 'block', marginBottom: 8 }}>🎨 分层着色</Text>
-
-          {/* 图层选择 */}
-          <Select
-            size={isMobile ? 'middle' : 'small'}
-            placeholder="选择要着色的图层..."
-            style={{ width: '100%', marginBottom: 6 }}
-            value={classifyLayerId}
-            onChange={(id) => { setClassifyLayerId(id); setClassifyField(null); setClassifyResult(null); }}
-            options={layers.filter(l => l.visible && l.data && ['polygon', 'geojson'].includes(l.type))
-              .map(l => ({ value: l.id, label: l.name }))}
-            allowClear
-          />
-
-          {/* 字段选择 */}
-          {numFields.length > 0 && (
-            <Select
-              size={isMobile ? 'middle' : 'small'}
-              placeholder={`选择数值字段（${numFields.length} 个可用）…`}
-              style={{ width: '100%', marginBottom: 6 }}
-              value={classifyField}
-              onChange={setClassifyField}
-              options={numFields.map(f => ({ value: f, label: f }))}
-            />
-          )}
-
-          {/* 色带选择 */}
-          {classifyField && (
-            <div style={{ display: 'flex', gap: 4, marginBottom: 8, flexWrap: 'wrap' }}>
-              {Object.entries(COLOR_RAMPS).map(([key, r]) => (
-                <Tooltip key={key} title={r.name}>
-                  <div
-                    onClick={() => setClassifyRamp(key)}
-                    style={{
-                      display: 'flex', height: 16, borderRadius: 3, overflow: 'hidden',
-                      cursor: 'pointer', flex: 1, minWidth: 40,
-                      border: key === classifyRamp ? '2px solid #1677ff' : '2px solid transparent',
-                    }}
-                  >
-                    {r.colors.map((c, i) => (
-                      <div key={i} style={{ flex: 1, background: c }} />
-                    ))}
-                  </div>
-                </Tooltip>
-              ))}
-            </div>
-          )}
-
-          {/* 操作按钮 */}
-          {classifyField && (
-            <div style={{ display: 'flex', gap: 6 }}>
-              <Button size={isMobile ? 'middle' : 'small'} type="primary" onClick={handleApplyClassify} block={!isMobile}>
-                应用着色
-              </Button>
-              {classifyResult && (
-                <Button size={isMobile ? 'middle' : 'small'} onClick={handleClearClassify}>清除</Button>
-              )}
-            </div>
-          )}
-
-          {/* 图例 */}
-          {classifyResult && classifyResult.legend.length > 0 && (
-            <div style={{ marginTop: 8, padding: '6px 8px', background: '#fafafa', borderRadius: 4 }}>
-              <Text style={{ fontSize: 10, color: '#999' }}>
-                {classifyResult.field} · {COLOR_RAMPS[classifyResult.rampName]?.name || classifyResult.rampName}
-              </Text>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginTop: 4 }}>
-                {classifyResult.legend.map((item, i) => (
-                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span style={{ width: 14, height: 10, borderRadius: 2, background: item.color, display: 'inline-block', flexShrink: 0 }} />
-                    <Text style={{ fontSize: 10 }}>{item.range}</Text>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {classifyLayer && numFields.length === 0 && classifyLayer.data && (
-            <Text type="secondary" style={{ fontSize: 11 }}>
-              该图层无可分级数值字段
-            </Text>
-          )}
-        </div>
-      )}
     </div>
   );
 };

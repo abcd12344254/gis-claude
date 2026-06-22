@@ -777,3 +777,342 @@ export function pointDensityAnalysis(
     description: `点密度分析完成：${grid.features.length} 个格网单元`,
   };
 }
+
+// ====== 高级空间分析 ======
+
+/**
+ * DBSCAN 聚类分析
+ * @param eps 邻域半径（km）
+ * @param minPts 最小点数（默认 3）
+ */
+export function clusterDBSCAN(
+  fc: FeatureCollection,
+  eps: number,
+  minPts: number = 3
+): SpatialAnalysisResult {
+  try {
+    const points = fc.features.filter(
+      f => f.geometry?.type === 'Point' || f.geometry?.type === 'MultiPoint'
+    );
+    if (points.length < minPts) {
+      return { type: 'dbscan', result: null, description: `❌ 点数量(${points.length})少于minPts(${minPts})` };
+    }
+
+    // 提取坐标
+    const coords = points.map(f => {
+      const g = f.geometry as any;
+      return g.type === 'MultiPoint' ? g.coordinates[0] : g.coordinates;
+    });
+
+    // 将 eps(km) 转为经度近似值
+    const latMid = coords.reduce((s, c) => s + c[1], 0) / coords.length;
+    const epsDeg = eps / (111.32 * Math.cos((latMid * Math.PI) / 180));
+    const epsSq = epsDeg * epsDeg;
+
+    // 手动 DBSCAN
+    const visited = new Set<number>();
+    const noise = new Set<number>();
+    const clusters: number[][] = [];
+    let clusterId = -1;
+
+    const regionQuery = (idx: number): number[] => {
+      const [x, y] = coords[idx];
+      const neighbors: number[] = [];
+      for (let j = 0; j < coords.length; j++) {
+        if (j === idx) continue;
+        const [xj, yj] = coords[j];
+        const dx = x - xj, dy = y - yj;
+        if (dx * dx + dy * dy <= epsSq) neighbors.push(j);
+      }
+      return neighbors;
+    };
+
+    for (let i = 0; i < coords.length; i++) {
+      if (visited.has(i)) continue;
+      visited.add(i);
+      const neighbors = regionQuery(i);
+      if (neighbors.length < minPts) {
+        noise.add(i);
+      } else {
+        clusterId++;
+        const cluster: number[] = [i];
+        const seeds = [...neighbors];
+        while (seeds.length > 0) {
+          const j = seeds.pop()!;
+          if (visited.has(j)) continue;
+          visited.add(j);
+          const jNeighbors = regionQuery(j);
+          if (jNeighbors.length >= minPts) {
+            seeds.push(...jNeighbors.filter(n => !visited.has(n)));
+          }
+          if (!noise.has(j)) {
+            cluster.push(j);
+            noise.delete(j);
+          }
+        }
+        clusters.push(cluster);
+      }
+    }
+
+    // 构建结果 FeatureCollection
+    const colors = ['#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231', '#911eb4',
+      '#42d4f4', '#f032e6', '#bfef45', '#fabebe', '#469990', '#e6beff'];
+    const resultFeatures: Feature[] = [];
+    for (let c = 0; c < clusters.length; c++) {
+      for (const idx of clusters[c]) {
+        resultFeatures.push({
+          ...points[idx],
+          properties: {
+            ...(points[idx].properties as any),
+            _clusterId: c,
+            _clusterColor: colors[c % colors.length],
+            _clusterSize: clusters[c].length,
+          },
+        });
+      }
+    }
+    // 噪点
+    for (const idx of noise) {
+      resultFeatures.push({
+        ...points[idx],
+        properties: {
+          ...(points[idx].properties as any),
+          _clusterId: -1,
+          _clusterColor: '#999999',
+          _clusterSize: 0,
+        },
+      });
+    }
+
+    return {
+      type: 'dbscan',
+      result: { type: 'FeatureCollection', features: resultFeatures },
+      description: `DBSCAN 聚类完成：${clusters.length} 个簇，${noise.size} 个噪点（eps=${eps}km, minPts=${minPts}）`,
+    };
+  } catch (err) {
+    return { type: 'dbscan', result: null, description: `❌ DBSCAN 失败: ${err instanceof Error ? err.message : err}` };
+  }
+}
+
+/**
+ * 核密度估计 (KDE)
+ * @param bandwidth 带宽（km，默认 1km）
+ * @param cellSize 输出格网大小（度，默认 0.01°）
+ */
+export function kernelDensityEstimation(
+  fc: FeatureCollection,
+  bandwidth: number = 1,
+  cellSize: number = 0.01
+): SpatialAnalysisResult {
+  try {
+    const points = fc.features.filter(
+      f => f.geometry?.type === 'Point' || f.geometry?.type === 'MultiPoint'
+    );
+    if (points.length === 0) {
+      return { type: 'kde', result: null, description: '❌ 无点要素可用于 KDE 分析' };
+    }
+
+    const coords = points.map(f => {
+      const g = f.geometry as any;
+      return g.type === 'MultiPoint' ? g.coordinates[0] : g.coordinates;
+    });
+
+    const bbox = turf.bbox(fc as any);
+    const grid = turf.squareGrid(bbox, cellSize, { units: 'degrees' });
+
+    // 带宽(km) 转 经度近似值
+    const latMid = (bbox[1] + bbox[3]) / 2;
+    const bwDeg = bandwidth / (111.32 * Math.cos((latMid * Math.PI) / 180));
+    const bwSq2 = 2 * bwDeg * bwDeg;
+
+    const gridCenters = grid.features.map(cell => {
+      const center = turf.centroid(cell as Feature<Polygon>);
+      return (center.geometry as Point).coordinates;
+    });
+
+    // Gaussian KDE
+    const densityValues = gridCenters.map(([cx, cy]) => {
+      let sum = 0;
+      for (const [px, py] of coords) {
+        const dx = cx - px, dy = cy - py;
+        const distSq = dx * dx + dy * dy;
+        sum += Math.exp(-distSq / bwSq2);
+      }
+      return sum / (coords.length * Math.PI * bwDeg * bwDeg * 2);
+    });
+
+    const maxDensity = Math.max(...densityValues, 1e-10);
+
+    const features = grid.features.map((cell, i) => ({
+      ...cell,
+      properties: {
+        ...cell.properties,
+        _density: densityValues[i],
+        _densityNorm: densityValues[i] / maxDensity,
+      },
+    }));
+
+    return {
+      type: 'kde',
+      result: { type: 'FeatureCollection', features },
+      description: `核密度估计完成：${grid.features.length} 个格网（带宽=${bandwidth}km, 像元=${cellSize}°）`,
+    };
+  } catch (err) {
+    return { type: 'kde', result: null, description: `❌ KDE 失败: ${err instanceof Error ? err.message : err}` };
+  }
+}
+
+/**
+ * 反距离权重插值 (IDW)
+ * @param valueField 要插值的数值字段名
+ * @param resolution 输出格网分辨率（度，默认 0.01°）
+ * @param power 距离权重幂（默认 2）
+ */
+export function interpolateIDW(
+  fc: FeatureCollection,
+  valueField: string,
+  resolution: number = 0.01,
+  power: number = 2
+): SpatialAnalysisResult {
+  try {
+    const points = fc.features.filter(f => {
+      const g = f.geometry?.type;
+      const v = (f.properties as any)?.[valueField];
+      return (g === 'Point' || g === 'MultiPoint') && typeof v === 'number' && !isNaN(v);
+    });
+    if (points.length < 3) {
+      return { type: 'idw', result: null, description: `❌ 有效数值点(${points.length})不足，至少需要3个` };
+    }
+
+    const samples = points.map(f => ({
+      coord: (f.geometry as any).type === 'MultiPoint'
+        ? (f.geometry as any).coordinates[0]
+        : (f.geometry as any).coordinates,
+      value: (f.properties as any)[valueField] as number,
+    }));
+
+    const bbox = turf.bbox(fc as any);
+    const grid = turf.squareGrid(bbox, resolution, { units: 'degrees' });
+
+    const gridCenters = grid.features.map(cell => {
+      const center = turf.centroid(cell as Feature<Polygon>);
+      return (center.geometry as Point).coordinates;
+    });
+
+    const interpolated = gridCenters.map(([cx, cy]) => {
+      let weightSum = 0, valueSum = 0;
+      for (const s of samples) {
+        const dx = cx - s.coord[0], dy = cy - s.coord[1];
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < 1e-10) return s.value; // 精确命中
+        const w = 1 / Math.pow(dist, power);
+        weightSum += w;
+        valueSum += w * s.value;
+      }
+      return weightSum > 0 ? valueSum / weightSum : NaN;
+    });
+
+    const validValues = interpolated.filter(v => !isNaN(v));
+    const minVal = Math.min(...validValues);
+    const maxVal = Math.max(...validValues);
+
+    const features = grid.features.map((cell, i) => ({
+      ...cell,
+      properties: {
+        ...cell.properties,
+        _idwValue: isNaN(interpolated[i]) ? null : interpolated[i],
+        _idwNorm: isNaN(interpolated[i]) ? null
+          : (interpolated[i] - minVal) / (maxVal - minVal || 1),
+      },
+    }));
+
+    return {
+      type: 'idw',
+      result: { type: 'FeatureCollection', features },
+      description: `IDW 插值完成：${grid.features.length} 个格网（字段=${valueField}, 分辨率=${resolution}°）`,
+    };
+  } catch (err) {
+    return { type: 'idw', result: null, description: `❌ IDW 插值失败: ${err instanceof Error ? err.message : err}` };
+  }
+}
+
+/**
+ * 分区统计 (Zonal Statistics)
+ * 对每个区域多边形，统计内部点要素的数值字段
+ * @param zones 区域面图层
+ * @param dataPoints 点数据图层
+ * @param valueField 要统计的数值字段
+ */
+export function zonalStatistics(
+  zones: FeatureCollection,
+  dataPoints: FeatureCollection,
+  valueField: string
+): SpatialAnalysisResult {
+  try {
+    const zoneFeatures = zones.features.filter(
+      f => f.geometry?.type === 'Polygon' || f.geometry?.type === 'MultiPolygon'
+    );
+    if (zoneFeatures.length === 0) {
+      return { type: 'zonal', result: null, description: '❌ 区域图层无面状要素' };
+    }
+
+    const pointFeatures = dataPoints.features.filter(f => {
+      const g = f.geometry?.type;
+      const v = (f.properties as any)?.[valueField];
+      return (g === 'Point' || g === 'MultiPoint') && typeof v === 'number' && !isNaN(v);
+    });
+
+    if (pointFeatures.length === 0) {
+      return { type: 'zonal', result: null, description: `❌ 点图层无有效数值字段"${valueField}"` };
+    }
+
+    const enrichedZones = zoneFeatures.map(zone => {
+      // 使用 turf 的 booleanPointInPolygon 检查每个点
+      let count = 0;
+      let sum = 0;
+      let min = Infinity;
+      let max = -Infinity;
+      const values: number[] = [];
+
+      for (const pt of pointFeatures) {
+        try {
+          if (turf.booleanPointInPolygon(pt as Feature<Point>, zone as Feature<Polygon>)) {
+            const v = (pt.properties as any)[valueField];
+            count++;
+            sum += v;
+            min = Math.min(min, v);
+            max = Math.max(max, v);
+            values.push(v);
+          }
+        } catch { /* skip invalid */ }
+      }
+
+      const mean = count > 0 ? sum / count : 0;
+      const stddev = count > 1
+        ? Math.sqrt(values.reduce((s, v) => s + (v - mean) ** 2, 0) / count)
+        : 0;
+
+      return {
+        ...zone,
+        properties: {
+          ...(zone.properties as any),
+          _zonal_count: count,
+          _zonal_sum: sum,
+          _zonal_mean: mean,
+          _zonal_min: count > 0 ? min : null,
+          _zonal_max: count > 0 ? max : null,
+          _zonal_stddev: stddev,
+        },
+      };
+    });
+
+    const totalPoints = enrichedZones.reduce((s, z) => s + ((z.properties as any)._zonal_count || 0), 0);
+    return {
+      type: 'zonal',
+      result: { type: 'FeatureCollection', features: enrichedZones },
+      description: `分区统计完成：${zoneFeatures.length} 个区域，共包含 ${totalPoints} 个点（字段=${valueField}）`,
+    };
+  } catch (err) {
+    return { type: 'zonal', result: null, description: `❌ 分区统计失败: ${err instanceof Error ? err.message : err}` };
+  }
+}
