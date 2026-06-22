@@ -833,25 +833,37 @@ export async function queryWaterways(
   const [w, s, e, n] = bbox;
   const bboxWidth = e - w;
   const bboxHeight = n - s;
-  const isLargeArea = bboxWidth > 3 || bboxHeight > 3;
-  const timeout = isLargeArea ? 90 : 25;
-  const outputFormat = isLargeArea ? 'out geom;' : 'out body;\n>;\nout skel qt;';
+  const isLargeArea = bboxWidth > 2 || bboxHeight > 2;
 
-  const query = `[out:json][timeout:${timeout}];
+  // 用短超时+out geom减小响应体积，避免 Overpass 502
+  const query = `[out:json][timeout:30];
 (
-  way["waterway"](${s},${w},${n},${e});
-  rel["waterway"](${s},${w},${n},${e});
-  way["waterway"="riverbank"](${s},${w},${n},${e});
-  way["natural"="water"](${s},${w},${n},${e});
-  way["water"](${s},${w},${n},${e});
-  rel["natural"="water"](${s},${w},${n},${e});
-  rel["water"](${s},${w},${n},${e});
-  rel["type"="multipolygon"]["natural"="water"](${s},${w},${n},${e});
+  nwr["waterway"](${s},${w},${n},${e});
+  nwr["natural"="water"](${s},${w},${n},${e});
+  nwr["water"](${s},${w},${n},${e});
 );
-${outputFormat}`;
+out geom;`;
+
+  // 大区域拆成两次查询：先 waterways + water，再 natural=water
+  const queryLarge = `[out:json][timeout:30];
+(
+  nwr["waterway"="river"](${s},${w},${n},${e});
+  nwr["natural"="water"](${s},${w},${n},${e});
+);
+out geom;`;
+
+  const selectedQuery = isLargeArea ? queryLarge : query;
 
   try {
-    const geojson = await overpassQuery(query);
+    const geojson = await overpassQuery(selectedQuery);
+    // 大区域再补查 canal/stream 等次要水系
+    if (isLargeArea) {
+      try {
+        const q2 = `[out:json][timeout:25];(nwr["waterway"="canal"](${s},${w},${n},${e});nwr["waterway"="stream"](${s},${w},${n},${e});nwr["water"](${s},${w},${n},${e}););out geom;`;
+        const geojson2 = await overpassQuery(q2);
+        geojson.features.push(...geojson2.features);
+      } catch { /* 补充查询失败不碍事 */ }
+    }
     return {
       type: 'water',
       label: '水系',
