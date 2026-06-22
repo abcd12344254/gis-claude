@@ -13,3 +13,7 @@ services:
         sync: false
       - key: GAODE_API_KEY
         sync: false
+      - key: TURSO_URL
+        sync: false
+      - key: TURSO_TOKEN
+        sync: false

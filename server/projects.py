@@ -1,17 +1,65 @@
 """
-项目持久化模块 — SQLite 存储用户的项目、图层、对话历史
+项目持久化模块 — SQLite/Turso 存储用户的项目、图层、对话历史
 """
-import json
-import sqlite3
+import os, json
 from datetime import datetime
-from auth import DB_PATH
+
+# 复用 auth 的 Turso 检测
+TURSO_URL = os.getenv("TURSO_URL", "")
+TURSO_TOKEN = os.getenv("TURSO_TOKEN", "")
+_USE_TURSO = bool(TURSO_URL and TURSO_TOKEN)
+
+if _USE_TURSO:
+    import libsql_experimental as _sql_driver
+    DB_PATH = TURSO_URL
+else:
+    import sqlite3 as _sql_driver
+    from auth import DB_PATH
+
+
+def _conn():
+    if _USE_TURSO:
+        c = _sql_driver.connect(TURSO_URL, auth_token=TURSO_TOKEN, sync_mode="write")
+        c.execute("PRAGMA foreign_keys = ON")
+        return c
+    else:
+        c = _sql_driver.connect(DB_PATH)
+        c.row_factory = _sql_driver.Row
+        c.execute("PRAGMA foreign_keys = ON")
+        return c
+
+
+def _dict(row):
+    """转 dict"""
+    if row is None: return None
+    if _USE_TURSO:
+        if isinstance(row, dict): return row
+        if hasattr(row, '_fields'): return dict(zip(row._fields, row))
+        return row
+    return dict(row)
+
+
+def _fetchone(cursor, conn=None):
+    if _USE_TURSO:
+        rows = cursor.fetchall()
+        return rows[0] if rows else None
+    return cursor.fetchone()
+
+
+def _fetchall(cursor, conn=None):
+    if _USE_TURSO:
+        rows = cursor.fetchall()
+        if rows and hasattr(cursor, 'description') and cursor.description:
+            return [dict(zip(cursor.description, r)) for r in rows]
+        return [dict(r) if isinstance(r, dict) else r for r in rows]
+    return [dict(r) for r in cursor.fetchall()]
+
 
 # === 表初始化 ===
 
-
 def init_project_tables():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
+    c = _conn()
+    c.execute(
         """
         CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -25,7 +73,7 @@ def init_project_tables():
         )
     """
     )
-    conn.execute(
+    c.execute(
         """
         CREATE TABLE IF NOT EXISTS project_layers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,19 +89,11 @@ def init_project_tables():
         )
     """
     )
-    conn.commit()
-    conn.close()
-
-
-def _conn():
-    c = sqlite3.connect(DB_PATH)
-    c.row_factory = sqlite3.Row
-    c.execute("PRAGMA foreign_keys = ON")
-    return c
+    c.commit()
+    c.close()
 
 
 # === 项目 CRUD ===
-
 
 def create_project(user_id: int, name: str, map_state: dict | None = None) -> dict:
     c = _conn()
@@ -62,32 +102,34 @@ def create_project(user_id: int, name: str, map_state: dict | None = None) -> di
         (user_id, name, json.dumps(map_state or {})),
     )
     c.commit()
-    pid = cur.lastrowid
-    row = c.execute("SELECT * FROM projects WHERE id = ?", (pid,)).fetchone()
+    pid = cur.lastrowid if hasattr(cur, 'lastrowid') else None
+    if pid is None:
+        pid = _fetchone(c.execute("SELECT last_insert_rowid()"), c)
+        pid = pid[0] if pid and not isinstance(pid, dict) else (pid.get('last_insert_rowid()') if isinstance(pid, dict) else 1)
+    row = _fetchone(c.execute("SELECT * FROM projects WHERE id = ?", (pid,)), c)
     c.close()
-    return dict(row)
+    return _dict(row)
 
 
 def list_projects(user_id: int) -> list[dict]:
     c = _conn()
-    rows = c.execute(
+    rows = _fetchall(c.execute(
         "SELECT * FROM projects WHERE user_id = ? ORDER BY updated_at DESC", (user_id,)
-    ).fetchall()
+    ), c)
     c.close()
-    return [dict(r) for r in rows]
+    return rows
 
 
 def get_project(project_id: int, user_id: int) -> dict | None:
     c = _conn()
-    row = c.execute(
+    row = _fetchone(c.execute(
         "SELECT * FROM projects WHERE id = ? AND user_id = ?", (project_id, user_id)
-    ).fetchone()
+    ), c)
     c.close()
-    return dict(row) if row else None
+    return _dict(row) if row else None
 
 
 def update_project(project_id: int, user_id: int, **kwargs) -> dict | None:
-    """更新项目字段: name, map_state, chat_history"""
     allowed = {"name", "map_state", "chat_history"}
     updates = {k: v for k, v in kwargs.items() if k in allowed}
     if not updates:
@@ -102,25 +144,23 @@ def update_project(project_id: int, user_id: int, **kwargs) -> dict | None:
     c = _conn()
     c.execute(f"UPDATE projects SET {set_clause} WHERE id = ? AND user_id = ?", values)
     c.commit()
-    row = c.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+    row = _fetchone(c.execute("SELECT * FROM projects WHERE id = ?", (project_id,)), c)
     c.close()
-    return dict(row) if row else None
+    return _dict(row) if row else None
 
 
 def delete_project(project_id: int, user_id: int) -> bool:
     c = _conn()
     c.execute("DELETE FROM projects WHERE id = ? AND user_id = ?", (project_id, user_id))
     c.commit()
-    deleted = c.rowcount > 0
+    deleted = c.rowcount > 0 if hasattr(c, 'rowcount') and c.rowcount else True
     c.close()
     return deleted
 
 
 # === 图层 CRUD ===
 
-
 def save_layers(project_id: int, layers: list[dict]):
-    """批量保存图层（先删后插）"""
     c = _conn()
     c.execute("DELETE FROM project_layers WHERE project_id = ?", (project_id,))
     for i, layer in enumerate(layers):
@@ -143,19 +183,19 @@ def save_layers(project_id: int, layers: list[dict]):
 
 def load_layers(project_id: int) -> list[dict]:
     c = _conn()
-    rows = c.execute(
+    rows = _fetchall(c.execute(
         "SELECT * FROM project_layers WHERE project_id = ? ORDER BY sort_order",
         (project_id,),
-    ).fetchall()
+    ), c)
     c.close()
     return [
         {
-            "name": r["name"],
-            "type": r["layer_type"],
-            "data": json.loads(r["geojson_data"]),
-            "color": r["color"],
-            "opacity": r["opacity"],
-            "visible": bool(r["visible"]),
+            "name": r["name"] if isinstance(r, dict) else (r[2] if len(r) > 2 else "unknown"),
+            "type": r["layer_type"] if isinstance(r, dict) else (r[3] if len(r) > 3 else "geojson"),
+            "data": json.loads(r["geojson_data"] if isinstance(r, dict) else (r[4] if len(r) > 4 else "{}")),
+            "color": r.get("color", "#1677ff") if isinstance(r, dict) else (r[5] if len(r) > 5 else "#1677ff"),
+            "opacity": r.get("opacity", 0.7) if isinstance(r, dict) else (r[6] if len(r) > 6 else 0.7),
+            "visible": bool(r.get("visible", True) if isinstance(r, dict) else (r[7] if len(r) > 7 else 1)),
         }
         for r in rows
     ]
