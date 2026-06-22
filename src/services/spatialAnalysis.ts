@@ -741,12 +741,29 @@ export function createGrid(
 
 /**
  * 点密度分析（简化版热力图数据）
+ * 如果不是点图层，自动转为面的中心点
  */
 export function pointDensityAnalysis(
-  points: FeatureCollection,
+  fc: FeatureCollection,
   cellSize: number = 0.01,
   radius: number = 0.05
 ): SpatialAnalysisResult {
+  // 自动转换非点要素为中心点
+  let points: FeatureCollection;
+  const pointFeatures = fc.features.filter(f => f.geometry?.type === 'Point' || f.geometry?.type === 'MultiPoint');
+  if (pointFeatures.length === 0) {
+    // 把线/面要素转为中心点
+    const centroids = fc.features
+      .filter(f => f.geometry && (f.geometry.type.includes('Polygon') || f.geometry.type.includes('LineString')))
+      .map(f => turf.centroid(f as Feature<any>));
+    if (centroids.length === 0) {
+      return { type: 'density', result: null, description: `❌ 图层无可用几何要素` };
+    }
+    points = turf.featureCollection(centroids) as FeatureCollection;
+  } else {
+    points = { type: 'FeatureCollection', features: pointFeatures } as FeatureCollection;
+  }
+
   const bbox = turf.bbox(points);
   const grid = turf.squareGrid(bbox, cellSize, {
     units: 'degrees',

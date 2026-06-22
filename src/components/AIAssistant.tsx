@@ -1574,7 +1574,18 @@ function buildSpatialContextStatic(store: ReturnType<typeof useGISStore.getState
     parts.push(`可见图层 (共${visibleLayers.length}个):`);
     for (const l of visibleLayers) {
       const geomTypes = new Set(l.data?.features?.map(f => f.geometry?.type) || []);
-      parts.push(`  · "${l.name}" — 类型:${l.type} | 几何:${[...geomTypes].join(',') || '无'} | ${l.data?.features?.length || 0}个要素`);
+      const geomStr = [...geomTypes].join(',') || '无';
+      const numFields = l.data ? findNumericFields(l.data) : [];
+      const hasPoints = geomTypes.has('Point') || geomTypes.has('MultiPoint');
+      const hasPolys = geomTypes.has('Polygon') || geomTypes.has('MultiPolygon');
+      let fieldInfo = numFields.length > 0
+        ? ` | 📐数值字段: ${numFields.join(', ')}`
+        : ' | ⚠️无数值字段';
+      const canDo = [];
+      if (hasPoints) canDo.push('density/kde/dbscan/idw');
+      if (hasPolys) canDo.push('buffer/area/intersect');
+      if (canDo.length > 0) fieldInfo += ` | ✅:${canDo.join(',')}`;
+      parts.push(`  · "${l.name}" — ${geomStr} (${l.data?.features?.length || 0}个)${fieldInfo}`);
     }
   }
   return parts.join('\n');
@@ -1650,9 +1661,20 @@ const AIAssistant: React.FC = () => {
       parts.push(`可见图层 (共${visibleLayers.length}个):`);
       for (const l of visibleLayers) {
         const geomTypes = new Set(l.data?.features?.map(f => f.geometry?.type) || []);
+        const geomStr = [...geomTypes].join(',') || '无';
         const numFields = l.data ? findNumericFields(l.data) : [];
-        const fieldInfo = numFields.length > 0 ? ` | 数值字段: ${numFields.join(', ')}` : '';
-        parts.push(`  · "${l.name}" — 类型:${l.type} | 几何:${[...geomTypes].join(',') || '无'} | ${l.data?.features?.length || 0}个要素${fieldInfo}`);
+        const hasPoints = geomTypes.has('Point') || geomTypes.has('MultiPoint');
+        const hasLines = geomTypes.has('LineString') || geomTypes.has('MultiLineString');
+        const hasPolys = geomTypes.has('Polygon') || geomTypes.has('MultiPolygon');
+        const fieldInfo = numFields.length > 0
+          ? ` | 📐数值字段: ${numFields.join(', ')}`
+          : ' | ⚠️无数值字段（不可做zonal/density/idw）';
+        const canDo = [];
+        if (hasPoints) canDo.push('density/kde/dbscan/idw');
+        if (hasPolys) canDo.push('buffer/area/intersect');
+        if (hasLines) canDo.push('buffer/simplify');
+        const canStr = canDo.length > 0 ? ` | ✅可分析: ${canDo.join(',')}` : '';
+        parts.push(`  · "${l.name}" — ${geomStr} (${l.data?.features?.length || 0}个)${fieldInfo}${canStr}`);
       }
     }
 
