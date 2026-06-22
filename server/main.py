@@ -160,10 +160,15 @@ def get_overpass_client() -> httpx.AsyncClient:
 
 @app.get("/api/health")
 async def health_check():
+    from auth import DB_PATH
+    db_exists = os.path.exists(DB_PATH)
     return {
         "status": "ok",
         "service": "GIS Claude API",
         "osm_proxy": OSM_PROXY or "direct",
+        "db_path": DB_PATH,
+        "db_exists": db_exists,
+        "on_render": bool(os.environ.get("RENDER")),
     }
 
 

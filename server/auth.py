@@ -14,8 +14,14 @@ SECRET_KEY = os.getenv("JWT_SECRET_KEY", "gis-claude-dev-secret-change-in-produc
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24 * 7  # 7 天
 # Render 持久化磁盘 /data，本地开发回退到 server/ 目录
-_DATA_DIR = "/data" if os.path.exists("/data") else os.path.dirname(__file__)
+# 用 RENDER 环境变量判断更可靠（Render 平台始终注入此变量）
+if os.environ.get("RENDER"):
+    _DATA_DIR = "/data"
+    os.makedirs(_DATA_DIR, exist_ok=True)  # 确保目录存在且可写
+else:
+    _DATA_DIR = os.path.dirname(__file__)
 DB_PATH = os.path.join(_DATA_DIR, "users.db")
+print(f"[auth] 用户数据库路径: {DB_PATH}")
 
 # 套餐配额映射
 PLAN_QUOTAS = {"free": 50, "pro": 200, "team": 1000}
