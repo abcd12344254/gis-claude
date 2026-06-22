@@ -58,8 +58,22 @@ class _TursoResult:
         self.lastrowid = raw_result.get("last_insert_rowid")
         self.rowcount = len(self.rows)
 
+    @staticmethod
+    def _unwrap(v):
+        """Turso 可能返回 {'type':'integer','value':'123'} 格式"""
+        if isinstance(v, dict) and 'value' in v:
+            raw = v['value']
+            t = v.get('type', '')
+            if t == 'integer': return int(raw) if raw is not None else None
+            if t == 'float': return float(raw) if raw is not None else None
+            return raw
+        return v
+
     def _d(self, row):
-        return dict(zip(self.columns, row)) if self.columns and isinstance(row, (list, tuple)) else row
+        if not self.columns: return row
+        if isinstance(row, (list, tuple)):
+            return {k: self._unwrap(v) for k, v in zip(self.columns, row)}
+        return row
 
     def fetchone(self):
         return self._d(self.rows[0]) if self.rows else None
