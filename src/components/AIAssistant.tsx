@@ -249,7 +249,11 @@ const GEOJSON_INSTRUCTION = `
   · 如果起点和终点都没有城市信息，且地图视野不在相关城市 → 询问用户
 
 ### 地图操作
-[MAP:zoomTo:lng,lat,zoom]  [MAP:addMarker:lng,lat,名称]  [MAP:fitBounds:w,s,e,n]
+[MAP:zoomTo:lng,lat,zoom]  [MAP:addMarker:lng,lat,名称]  [MAP:fitBounds:w,s,e,n]  [MAP:clearLayers]
+- zoomTo: 飞到指定坐标和缩放级别
+- addMarker: 在地图上添加标记点
+- fitBounds: 缩放到指定范围 (西,南,东,北)
+- clearLayers: 清空所有图层（用户说"清空图层"/"删除所有数据"/"清除地图"时使用）
 
 ### 时空分析指令
 \`\`\`
@@ -1793,6 +1797,13 @@ const AIAssistant: React.FC = () => {
           );
           message.success('🔍 已缩放到指定范围');
         }
+        break;
+      }
+      case 'clearLayers': {
+        const store = useGISStore.getState();
+        const count = store.layers.length;
+        store.setLayers([]);
+        message.success(`🗑️ 已清空 ${count} 个图层`);
         break;
       }
     }
