@@ -507,7 +507,8 @@ async def chat(
         if m.role in ("user", "assistant", "system"):
             messages.append({"role": m.role, "content": m.content})
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    # trust_env=False 避免被 HTTPS_PROXY 劫持导致连接失败
+    async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
         try:
             response = await client.post(
                 DEEPSEEK_API_URL,
@@ -564,7 +565,8 @@ async def chat_stream(
 
     async def event_stream():
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            # trust_env=False 避免被 HTTPS_PROXY 劫持导致连接失败
+            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
                 async with client.stream(
                     "POST",
                     DEEPSEEK_API_URL,

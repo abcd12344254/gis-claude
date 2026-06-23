@@ -381,6 +381,8 @@ HTTPS_PROXY=http://127.0.0.1:7890  # 代理（国内访问 OSM/Wikidata/OSRM 需
 3. **intersect 对复杂几何失败** — 用 `turf.truncate` + `turf.simplify` + `turf.unkinkPolygon` 递进清洁重试
 4. **OSM 数据含冗余标记点** — `osmToGeoJSON` 跳过面状查询结果中的孤立 tagged node
 5. **GCJ-02 坐标偏移** — 高德返回的是火星坐标，后端 `main.py` 内置了 GCJ-02 → WGS-84 转换算法
+6. **OSM 数据与高德底图偏移** — 默认底图为高德(GCJ-02)，OSM 数据为 WGS-84，二者差 300-500m。修复：`src/utils/coordTransform.ts` 提供 `wgs84ToGcj02`，Zustand store 的 `addLayer` 自动检测 `basemapUrl` 是否含 `autonavi.com`，是则自动转换 GeoJSON 坐标。MapView 底图切换时同步更新 `store.setBasemapUrl()`。
+7. **自然地物查询歧义（西湖→南昌西湖区）** — AI 提示词加了消歧规则（单名不含"区/市/县"→默认查自然地物 + 具体示例），`executeOSMCommand` 的 `feature` 分支改为 OSM 优先（OSM 面状数据更适合自然地物），高德 fallback 时检测返回结果含"区/市/县"但查询不含时标注"可能不是你要的自然地物"。
 6. **OSM 国内无法访问** — 需在 `server/.env` 配置 `HTTPS_PROXY`；Nominatim 超时/连接失败时给出明确的代理配置提示
 
 ---

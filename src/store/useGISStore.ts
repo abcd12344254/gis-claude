@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { GISLayer, DrawingState, ChatMessage, MapState, AnalysisTask } from '../types';
+import { isGCJ02Basemap, wgs84ToGcj02, transformGeoJSONCoords } from '../utils/coordTransform';
 
 export interface UserInfo {
   id: number;
@@ -53,6 +54,10 @@ interface GISStore {
   terrain3dEnabled: boolean;
   setTerrain3dEnabled: (enabled: boolean) => void;
 
+  // Basemap (for coordinate system detection)
+  basemapUrl: string;
+  setBasemapUrl: (url: string) => void;
+
   // API Key
   deepseekApiKey: string;
   setDeepseekApiKey: (key: string) => void;
@@ -97,9 +102,16 @@ export const useGISStore = create<GISStore>((set) => ({
 
   layers: [],
   addLayer: (layer) =>
-    set((s) => ({
-      layers: [...s.layers, { ...layer, id: layer.id || `layer-${++layerCounter}` }],
-    })),
+    set((s) => {
+      let data = layer.data;
+      // 当底图为高德(GCJ-02)，OSM/上传的 WGS-84 数据自动转换以对齐底图
+      if (data && isGCJ02Basemap(s.basemapUrl)) {
+        data = transformGeoJSONCoords(data, wgs84ToGcj02) as typeof layer.data;
+      }
+      return {
+        layers: [...s.layers, { ...layer, data, id: layer.id || `layer-${++layerCounter}` }],
+      };
+    }),
   removeLayer: (id) =>
     set((s) => ({ layers: s.layers.filter((l) => l.id !== id) })),
   updateLayer: (id, updates) =>
@@ -160,6 +172,10 @@ export const useGISStore = create<GISStore>((set) => ({
 
   terrain3dEnabled: false,
   setTerrain3dEnabled: (enabled) => set({ terrain3dEnabled: enabled }),
+
+  // 默认底图 = 高德（GCJ-02）
+  basemapUrl: 'https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',
+  setBasemapUrl: (url) => set({ basemapUrl: url }),
 
   deepseekApiKey:
     localStorage.getItem('deepseek_api_key') || '',

@@ -159,6 +159,7 @@ const MapView: React.FC = () => {
     const handleChangeBasemap = (e: Event) => {
       const bm = (e as CustomEvent).detail;
       prevBasemapUrl.current = bm.url;
+      useGISStore.getState().setBasemapUrl(bm.url);
       const sourceId = 'osm-tiles';
       const source = map.getSource(sourceId) as maplibregl.RasterTileSource;
       if (source) {
@@ -175,6 +176,7 @@ const MapView: React.FC = () => {
         if (source) {
           source.setTiles(['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}']);
         }
+        useGISStore.getState().setBasemapUrl('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}');
         if (map.getLayer('hillshade-layer')) {
           map.setLayoutProperty('hillshade-layer', 'visibility', 'visible');
         }
@@ -186,6 +188,7 @@ const MapView: React.FC = () => {
         if (source) {
           source.setTiles([prevBasemapUrl.current]);
         }
+        useGISStore.getState().setBasemapUrl(prevBasemapUrl.current);
         if (map.getLayer('hillshade-layer')) {
           map.setLayoutProperty('hillshade-layer', 'visibility', 'none');
         }

@@ -45,6 +45,8 @@ interface NominatimResult {
  * 地名 → 坐标查询
  */
 export async function geocodeSearch(query: string): Promise<NominatimResult[]> {
+  // viewbox: 中国大陆范围 [west,south,east,north]，让 Nominatim 优先返回国内结果
+  // countrycodes=cn 排除境外同名结果（如台湾高雄"杭州西湖路"）
   const params = new URLSearchParams({
     q: query,
     format: 'jsonv2',
@@ -53,6 +55,9 @@ export async function geocodeSearch(query: string): Promise<NominatimResult[]> {
     polygon_geojson: '1',
     extratags: '1',
     'accept-language': 'zh',
+    'countrycodes': 'cn',
+    'viewbox': '73.5,18.1,134.8,53.6',
+    'bounded': '0',  // 0=优先视野内但不强制，1=仅视野内
   });
 
   // 通过 Python 后端代理（解决 CORS 和国内网络问题）
@@ -1652,11 +1657,78 @@ export function parseOSMCommands(text: string): OSMCommand[] {
 }
 
 /**
+ * 著名自然地物 Wikidata ID 对照表
+ * 绕过 Nominatim 中文搜索不准确的问题，直接用 Wikidata ID → OSM 关系查询
+ * 查询格式：relation["wikidata"="Qxxxx"]; out geom;
+ */
+const KNOWN_FEATURES: Record<string, { overpassQL: string; label: string }> = {
+  '西湖':       { overpassQL: '[out:json][timeout:25];(way["natural"="water"]["name:en"="West Lake"](30.15,120.05,30.30,120.25);relation["natural"="water"]["name:en"="West Lake"](30.15,120.05,30.30,120.25););out geom;', label: '杭州西湖（湖泊）' },
+  '杭州西湖':    { overpassQL: '[out:json][timeout:25];(way["natural"="water"]["name:en"="West Lake"](30.15,120.05,30.30,120.25);relation["natural"="water"]["name:en"="West Lake"](30.15,120.05,30.30,120.25););out geom;', label: '杭州西湖（湖泊）' },
+  '太湖':       { overpassQL: '[out:json][timeout:25];(way["natural"="water"]["name:en"="Tai Lake"](30.9,119.8,31.5,120.5);relation["natural"="water"]["name:en"="Tai Lake"](30.9,119.8,31.5,120.5););out geom;', label: '太湖（湖泊）' },
+  '洞庭湖':     { overpassQL: '[out:json][timeout:25];(way["natural"="water"]["name"="洞庭湖"](28.7,112.2,29.6,113.2);relation["natural"="water"]["name"="洞庭湖"](28.7,112.2,29.6,113.2););out geom;', label: '洞庭湖（湖泊）' },
+  '鄱阳湖':     { overpassQL: '[out:json][timeout:25];(way["natural"="water"]["name:en"="Poyang Lake"](28.5,115.8,29.8,116.8);relation["natural"="water"]["name:en"="Poyang Lake"](28.5,115.8,29.8,116.8););out geom;', label: '鄱阳湖（湖泊）' },
+  '青海湖':     { overpassQL: '[out:json][timeout:25];(way["natural"="water"]["name"="青海湖"](36.5,99.5,37.2,101.0);relation["natural"="water"]["name"="青海湖"](36.5,99.5,37.2,101.0););out geom;', label: '青海湖（湖泊）' },
+  '滇池':       { overpassQL: '[out:json][timeout:25];(way["natural"="water"]["name:en"="Dian Lake"](24.7,102.5,25.1,102.9);relation["natural"="water"]["name"="滇池"](24.7,102.5,25.1,102.9););out geom;', label: '滇池（湖泊）' },
+  '洱海':       { overpassQL: '[out:json][timeout:25];(way["natural"="water"]["name"="洱海"](25.5,100.0,25.9,100.3);relation["natural"="water"]["name"="洱海"](25.5,100.0,25.9,100.3););out geom;', label: '洱海（湖泊）' },
+  '黄山':       { overpassQL: '[out:json][timeout:25];(way["natural"="peak"]["name:en"="Huangshan"](29.9,117.8,30.3,118.5);relation["name:en"="Yellow Mountain"](29.9,117.8,30.3,118.5););out geom;', label: '黄山（山脉）' },
+  '黄山风景区':  { overpassQL: '[out:json][timeout:25];(way["natural"="peak"]["name:en"="Huangshan"](29.9,117.8,30.3,118.5);relation["name:en"="Yellow Mountain"](29.9,117.8,30.3,118.5););out geom;', label: '黄山（山脉）' },
+  '泰山':       { overpassQL: '[out:json][timeout:25];(way["natural"="peak"]["name"="泰山"](36.2,117.0,36.3,117.2);relation["name"="泰山"](36.2,117.0,36.3,117.2););out geom;', label: '泰山（山脉）' },
+  '华山':       { overpassQL: '[out:json][timeout:25];(way["natural"="peak"]["name"="华山"](34.3,109.9,34.6,110.2);relation["name"="华山"](34.3,109.9,34.6,110.2););out geom;', label: '华山（山脉）' },
+  '天山':       { overpassQL: '[out:json][timeout:25];relation["name"="天山山脉"](40,74,45,96);out geom;', label: '天山山脉' },
+  '天山山脉':    { overpassQL: '[out:json][timeout:25];relation["name"="天山山脉"](40,74,45,96);out geom;', label: '天山山脉' },
+  '长江':       { overpassQL: '[out:json][timeout:25];relation["waterway"="river"]["name:en"="Yangtze"](24,90,35,122);out geom;', label: '长江（河流）' },
+  '黄河':       { overpassQL: '[out:json][timeout:25];relation["waterway"="river"]["name:en"="Yellow River"](32,95,42,120);out geom;', label: '黄河（河流）' },
+  '长城':       { overpassQL: '[out:json][timeout:25];relation["historic"="wall"]["name:en"="Great Wall"](38,105,42,120);out geom;', label: '万里长城' },
+  '故宫':       { overpassQL: '[out:json][timeout:25];relation["name:en"="Forbidden City"](39.9,116.38,39.93,116.42);out geom;', label: '北京故宫' },
+};
+
+/** 地名消歧：AI 可能输出简称，自动补全为精确查询名 */
+const FEATURE_DISAMBIGUATION: Record<string, string> = {
+  '西湖': '杭州西湖',
+  '太湖': '太湖',
+  '黄山': '黄山风景区',
+  '巢湖': '巢湖',
+  '洞庭湖': '洞庭湖',
+  '鄱阳湖': '鄱阳湖',
+  '洪湖': '洪湖',
+  '滇池': '滇池',
+  '洱海': '洱海',
+  '青海湖': '青海湖',
+  '天山': '天山山脉',
+  '太行山': '太行山脉',
+  '大兴安岭': '大兴安岭',
+  '长江': '长江',
+  '黄河': '黄河',
+  '泰山': '泰山',
+  '华山': '华山',
+  '长城': '长城',
+  '故宫': '故宫',
+};
+
+/** 通过已知 Overpass QL 直查 OSM，绕过不靠谱的 Nominatim 中文搜索 */
+async function queryKnownFeature(overpassQL: string, label: string): Promise<OSMQueryResult | null> {
+  try {
+    const geojson = await overpassQuery(overpassQL);
+    if (geojson.features.length > 0) {
+      return {
+        type: 'custom',
+        label,
+        geojson,
+        description: `✓ 已找到${label}数据 (${geojson.features.length}个要素)`,
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 执行 OSM 命令
  *
  * @param cmd           解析出的命令
  * @param currentBounds 当前地图视野 [west, south, east, north]
- * @param overrideBounds 可选：从上一个 boundary 命令获取的精确 bbox，优先于 currentBounds
+ * @param overrideBounds 可选：从上一个 boundary 命令获取的精确 bbox，优先于当前边界
  */
 export async function executeOSMCommand(
   cmd: OSMCommand,
@@ -1712,23 +1784,56 @@ export async function executeOSMCommand(
 
     // ====== 通用地理要素（沙漠/山脉/湖泊/大学等） ======
     case 'feature': {
-      const gaodeFirst = await gaodeGeocode(cmd.params);
-      const gaodeHasPolygon = gaodeFirst.geojson
-        ? gaodeFirst.geojson.features.some((f: any) => f.geometry?.type === 'Polygon' || f.geometry?.type === 'MultiPolygon')
-        : false;
+      // 消歧：AI 可能输出简称（如"西湖"），自动补全（如"杭州西湖"）
+      const disambiguated = FEATURE_DISAMBIGUATION[cmd.params] || cmd.params;
 
-      if (gaodeHasPolygon) {
-        result = { type: 'custom', label: gaodeFirst.label, geojson: gaodeFirst.geojson!, description: gaodeFirst.description };
-      } else if (gaodeFirst.geojson && gaodeFirst.geojson.features.length > 0) {
-        // 高德有点但无面 → 先试 OSM 拿面，失败再用高德的点
-        const osmResult = await queryFeature(cmd.params);
-        if (osmResult.geojson && osmResult.geojson.features.length > 0) {
-          result = osmResult;
+      // === 第1层：已知自然地物直接用 Wikidata ID 查 OSM（绕过不靠谱的 Nominatim 中文搜索）===
+      const knownFeature = KNOWN_FEATURES[cmd.params] || KNOWN_FEATURES[disambiguated];
+      if (knownFeature) {
+        const wkResult = await queryKnownFeature(knownFeature.overpassQL, knownFeature.label);
+        if (wkResult?.geojson && wkResult.geojson.features.length > 0) {
+          result = wkResult;
+          if (result.geojson) resultBbox = getFCBbox(result.geojson);
+          break;
+        }
+      }
+
+      // === 第2层：Nominatim → OSM ID → Overpass ===
+      const osmResult = await queryFeature(disambiguated);
+      if (osmResult.geojson && osmResult.geojson.features.length > 0) {
+        result = osmResult;
+      } else if (disambiguated !== cmd.params) {
+        // 消歧后仍失败 → 用原名再试一次 OSM
+        const osmRetry = await queryFeature(cmd.params);
+        if (osmRetry.geojson && osmRetry.geojson.features.length > 0) {
+          result = osmRetry;
         } else {
-          result = { type: 'custom', label: gaodeFirst.label, geojson: gaodeFirst.geojson, description: `⚠️ 仅坐标定位：${gaodeFirst.description}` };
+          result = { type: 'custom', label: cmd.params, geojson: null, description: `未找到"${cmd.params}"——OSM 和高德均无该地物的面状数据`, error: 'NOT_FOUND' };
         }
       } else {
-        result = await queryFeature(cmd.params);
+        // === 第3层：高德 fallback ===
+        const gaodeFirst = await gaodeGeocode(cmd.params);
+        const gaodeHasPolygon = gaodeFirst.geojson
+          ? gaodeFirst.geojson.features.some((f: any) => f.geometry?.type === 'Polygon' || f.geometry?.type === 'MultiPolygon')
+          : false;
+
+        if (gaodeHasPolygon) {
+          result = { type: 'custom', label: gaodeFirst.label, geojson: gaodeFirst.geojson!, description: gaodeFirst.description };
+        } else if (gaodeFirst.geojson && gaodeFirst.geojson.features.length > 0) {
+          const gaodeLabel = gaodeFirst.label || '';
+          const queryIsDistrict = /[区市县省]$/.test(cmd.params);
+          const gaodeIsDistrict = /[区市县省]/.test(gaodeLabel) && !queryIsDistrict;
+          if (gaodeIsDistrict) {
+            result = {
+              type: 'custom', label: gaodeFirst.label, geojson: gaodeFirst.geojson,
+              description: `⚠️ 高德仅返回"${gaodeLabel}"的坐标点（可能不是你要的自然地物），OSM 无该地物面状数据`,
+            };
+          } else {
+            result = { type: 'custom', label: gaodeFirst.label, geojson: gaodeFirst.geojson, description: `⚠️ 仅坐标定位：${gaodeFirst.description}` };
+          }
+        } else {
+          result = { type: 'custom', label: cmd.params, geojson: null, description: `未找到"${cmd.params}"（OSM和高德均无结果）`, error: 'NOT_FOUND' };
+        }
       }
       if (result.geojson) {
         resultBbox = getFCBbox(result.geojson);

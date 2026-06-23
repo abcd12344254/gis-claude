@@ -280,18 +280,20 @@ const LayerPanel: React.FC = () => {
 
                 {/* Type icon + name */}
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                    <span>{GEOMETRY_ICONS[layer.type] || '📦'}</span>
-                    <Text
-                      ellipsis
-                      style={{
-                        fontSize: 12,
-                        textDecoration: layer.visible ? 'none' : 'line-through',
-                        color: layer.visible ? '#000' : '#999',
-                      }}
-                    >
-                      {layer.name}
-                    </Text>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
+                    <span style={{ flexShrink: 0 }}>{GEOMETRY_ICONS[layer.type] || '📦'}</span>
+                    <Tooltip title={layer.name} placement="topLeft">
+                      <Text
+                        ellipsis={{ tooltip: false }}
+                        style={{
+                          fontSize: 12, flex: 1, minWidth: 0,
+                          textDecoration: layer.visible ? 'none' : 'line-through',
+                          color: layer.visible ? '#000' : '#999',
+                        }}
+                      >
+                        {layer.name}
+                      </Text>
+                    </Tooltip>
                   </div>
                   {layer.data && (
                     <Text
