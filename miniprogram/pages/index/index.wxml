@@ -1,0 +1,6 @@
+<!-- 核心就是这一个 web-view，你的整个 React 应用都在里面跑 -->
+<web-view
+  src="{{url}}"
+  bindload="onWebviewLoad"
+  binderror="onWebviewError"
+></web-view>

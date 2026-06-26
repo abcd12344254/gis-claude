@@ -9,8 +9,9 @@ import { flattenCoords, getFCBbox } from '../utils/geo';
 
 // 使用 Python 后端代理 OSM API（解决 CORS + 国内网络问题）
 // Python httpx 支持 HTTPS_PROXY 环境变量翻墙
-const NOMINATIM_URL = '/api/osm/nominatim';
-const OVERPASS_URL = '/api/osm/overpass';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
+const NOMINATIM_URL = `${API_BASE}/api/osm/nominatim`;
+const OVERPASS_URL = `${API_BASE}/api/osm/overpass`;
 
 /** 查询结果 */
 export interface OSMQueryResult {
@@ -438,7 +439,7 @@ out geom;`;
     // 很多大型自然地物（华北平原、东北平原等）在OSM中仅为点，
     // 但 Wikidata 中有完整实体，可通过 wikidata=* 标签关联到 OSM relation
     try {
-      const wdSearchUrl = `/api/wikidata/search?q=${encodeURIComponent(placeName)}&language=zh&limit=3`;
+      const wdSearchUrl = `${API_BASE}/api/wikidata/search?q=${encodeURIComponent(placeName)}&language=zh&limit=3`;
       const wdSearchResp = await fetchWithTimeout(wdSearchUrl, 8000);
       if (wdSearchResp.ok) {
         const wdSearchData = await wdSearchResp.json();
@@ -469,13 +470,13 @@ out geom;`;
 
     // ====== 策略2e: Wikidata 搜索 → Wikidata 坐标 → 点标记 ======
     try {
-      const wdSearchUrl2 = `/api/wikidata/search?q=${encodeURIComponent(placeName)}&language=zh&limit=1`;
+      const wdSearchUrl2 = `${API_BASE}/api/wikidata/search?q=${encodeURIComponent(placeName)}&language=zh&limit=1`;
       const wdSearchResp2 = await fetchWithTimeout(wdSearchUrl2, 8000);
       if (wdSearchResp2.ok) {
         const wdSearchData2 = await wdSearchResp2.json();
         const topEntity = wdSearchData2.search?.[0];
         if (topEntity) {
-          const wdEntityUrl = `/api/wikidata/entity/${topEntity.id}`;
+          const wdEntityUrl = `${API_BASE}/api/wikidata/entity/${topEntity.id}`;
           const wdEntityResp = await fetchWithTimeout(wdEntityUrl, 8000);
           if (wdEntityResp.ok) {
             const wdEntityData = await wdEntityResp.json();
@@ -534,7 +535,7 @@ out geom;`;
 
       // ====== 策略3b: Wikidata API 直接获取坐标 ======
       try {
-        const wdApiUrl = `/api/wikidata/entity/${wikidataId}`;
+        const wdApiUrl = `${API_BASE}/api/wikidata/entity/${wikidataId}`;
         const wdResp = await fetchWithTimeout(wdApiUrl, 8000);
         if (wdResp.ok) {
           const wdData = await wdResp.json();
@@ -599,13 +600,13 @@ out geom;`;
     // 针对中国大学/医院等 POI：Nominatim 可能不返回 extratags.wikidata
     // 但 Wikidata 本身有很好的实体覆盖，直接用名称搜索
     try {
-      const wdSearchUrl = `/api/wikidata/search?q=${encodeURIComponent(placeName)}&language=zh&limit=3`;
+      const wdSearchUrl = `${API_BASE}/api/wikidata/search?q=${encodeURIComponent(placeName)}&language=zh&limit=3`;
       const wdResp = await fetchWithTimeout(wdSearchUrl, 8000);
       if (wdResp.ok) {
         const wdData = await wdResp.json();
         const entities = wdData.search || [];
         for (const entity of entities) {
-          const entityUrl = `/api/wikidata/entity/${entity.id}`;
+          const entityUrl = `${API_BASE}/api/wikidata/entity/${entity.id}`;
           try {
             const entResp = await fetchWithTimeout(entityUrl, 8000);
             if (!entResp.ok) continue;

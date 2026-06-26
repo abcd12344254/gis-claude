@@ -8,13 +8,14 @@ import type { FeatureCollection, Feature, LineString, Point } from 'geojson';
 import { flattenCoords, getFCBounds } from '../utils/geo';
 
 // OSRM 通过 Python 后端代理（解决国内网络问题）
-const OSRM_PROXY = '/api/osrm/route';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
+const OSRM_PROXY = `${API_BASE}/api/osrm/route`;
 
 // Nominatim 代理（复用现有后端）
-const NOMINATIM_URL = '/api/osm/nominatim';
+const NOMINATIM_URL = `${API_BASE}/api/osm/nominatim`;
 
 // 高德地理编码（国内 POI 更准）
-const GAODE_GEOCODE_URL = '/api/gaode/geocode';
+const GAODE_GEOCODE_URL = `${API_BASE}/api/gaode/geocode`;
 
 // ====== 类型定义 ======
 

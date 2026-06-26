@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Modal, Form, Input, Button, Tabs, message } from 'antd';
 import { MailOutlined, LockOutlined } from '@ant-design/icons';
 import { useGISStore } from '../store/useGISStore';
+import { API_BASE } from '../utils/api';
 
 interface AuthModalProps {
   open: boolean;
@@ -16,7 +17,7 @@ const AuthModal: React.FC<AuthModalProps> = ({ open, onClose }) => {
   const handleSubmit = async (values: { email: string; password: string }) => {
     if (loading) return;
     setLoading(true);
-    const endpoint = activeTab === 'login' ? '/api/auth/login' : '/api/auth/register';
+    const endpoint = activeTab === 'login' ? `${API_BASE}/api/auth/login` : `${API_BASE}/api/auth/register`;
     console.log(`[AuthModal] 提交 ${activeTab}:`, values.email, endpoint);
     try {
       const res = await fetch(endpoint, {

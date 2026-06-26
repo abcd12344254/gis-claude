@@ -1,0 +1,94 @@
+# ====== 资源清单（Resource Catalog） ======
+# 遵循 HermesAgent 文档 3.2 节规范
+# 管理员维护系统中所有可用 GIS 资源的注册表
+# 通过 /api/resources 端点暴露给 Agent
+
+resources:
+  - resource_id: "handan_districts"
+    resource_name: "邯郸区县"
+    resource_type: "file"
+    data_format: "geojson"
+    description: "邯郸市区县级行政区划边界数据"
+    spatial_extent: "河北省邯郸市"
+    coordinate_system: "WGS84 (EPSG:4326)"
+    data_category: "行政区划"
+    access:
+      type: "file"
+      path: "public/邯郸区县.geojson"
+
+  - resource_id: "handan_city"
+    resource_name: "邯郸市"
+    resource_type: "file"
+    data_format: "json"
+    description: "邯郸市综合地理数据（含边界、水系、路网等）"
+    spatial_extent: "河北省邯郸市"
+    coordinate_system: "WGS84 (EPSG:4326)"
+    data_category: "综合地理数据"
+    access:
+      type: "file"
+      path: "public/邯郸市.json"
+
+  - resource_id: "osm_china_boundaries"
+    resource_name: "OSM 中国行政区划"
+    resource_type: "service"
+    data_format: "overpass"
+    description: "通过 OpenStreetMap Overpass API 查询中国各级行政区划边界"
+    spatial_extent: "中国全境"
+    coordinate_system: "WGS84 (EPSG:4326)"
+    data_category: "行政区划"
+    access:
+      type: "service"
+      service_type: "overpass"
+      url: "https://overpass-api.de/api/interpreter"
+
+  - resource_id: "osm_global_poi"
+    resource_name: "OSM 全球 POI"
+    resource_type: "service"
+    data_format: "overpass"
+    description: "通过 OpenStreetMap Overpass API 查询全球兴趣点"
+    spatial_extent: "全球"
+    coordinate_system: "WGS84 (EPSG:4326)"
+    data_category: "POI"
+    access:
+      type: "service"
+      service_type: "overpass"
+      url: "https://overpass-api.de/api/interpreter"
+
+  - resource_id: "gaode_poi_china"
+    resource_name: "高德中国 POI"
+    resource_type: "service"
+    data_format: "rest_api"
+    description: "高德地图 POI 搜索，国内数据覆盖更全面"
+    spatial_extent: "中国全境"
+    coordinate_system: "GCJ-02（自动转换为 WGS84）"
+    data_category: "POI"
+    access:
+      type: "service"
+      service_type: "rest_api"
+      url: "https://restapi.amap.com/v3/place/text"
+
+  - resource_id: "osrm_routing"
+    resource_name: "OSRM 路径规划"
+    resource_type: "service"
+    data_format: "rest_api"
+    description: "基于 OpenStreetMap 路网的驾车/步行/骑行路径规划"
+    spatial_extent: "全球"
+    coordinate_system: "WGS84 (EPSG:4326)"
+    data_category: "网络分析"
+    access:
+      type: "service"
+      service_type: "rest_api"
+      url: "https://router.project-osrm.org"
+
+  - resource_id: "usgs_earthquakes"
+    resource_name: "USGS 地震数据"
+    resource_type: "service"
+    data_format: "rest_api"
+    description: "美国地质调查局近90天全球地震目录"
+    spatial_extent: "全球"
+    coordinate_system: "WGS84 (EPSG:4326)"
+    data_category: "灾害数据"
+    access:
+      type: "service"
+      service_type: "rest_api"
+      url: "https://earthquake.usgs.gov/fdsnws/event/1/query"

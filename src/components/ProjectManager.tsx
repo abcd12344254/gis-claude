@@ -7,6 +7,7 @@ import {
   DeleteOutlined,
 } from '@ant-design/icons';
 import { useGISStore } from '../store/useGISStore';
+import { API_BASE } from '../utils/api';
 
 const { Text } = Typography;
 
@@ -33,7 +34,7 @@ const ProjectManager: React.FC = () => {
   const fetchProjects = useCallback(async () => {
     if (!authToken) return;
     try {
-      const res = await fetch('/api/projects', { headers });
+      const res = await fetch(`${API_BASE}/api/projects`, { headers });
       if (res.ok) setProjects(await res.json());
     } catch {}
   }, [authToken]);
@@ -47,7 +48,7 @@ const ProjectManager: React.FC = () => {
     setLoading(true);
     try {
       // Create project
-      const res = await fetch('/api/projects', {
+      const res = await fetch(`${API_BASE}/api/projects`, {
         method: 'POST',
         headers,
         body: JSON.stringify({

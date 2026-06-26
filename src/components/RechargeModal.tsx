@@ -6,6 +6,7 @@ import {
   CheckCircleFilled,
 } from '@ant-design/icons';
 import { useGISStore } from '../store/useGISStore';
+import { API_BASE } from '../utils/api';
 
 interface RechargeModalProps {
   open: boolean;
@@ -93,8 +94,8 @@ const RechargeModal: React.FC<RechargeModalProps> = ({
         try {
           const token = useGISStore.getState().authToken;
           const url = adminMode
-            ? `/api/admin/users/${adminUserId}/upgrade`
-            : '/api/recharge/upgrade';
+            ? `${API_BASE}/api/admin/users/${adminUserId}/upgrade`
+            : `${API_BASE}/api/recharge/upgrade`;
           const resp = await fetch(url, {
             method: 'POST',
             headers: {
@@ -146,8 +147,8 @@ const RechargeModal: React.FC<RechargeModalProps> = ({
         try {
           const token = useGISStore.getState().authToken;
           const url = adminMode
-            ? `/api/admin/users/${adminUserId}/quota`
-            : '/api/recharge/quota';
+            ? `${API_BASE}/api/admin/users/${adminUserId}/quota`
+            : `${API_BASE}/api/recharge/quota`;
           const resp = await fetch(url, {
             method: 'POST',
             headers: {

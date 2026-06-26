@@ -4,8 +4,9 @@
  */
 import type { FeatureCollection } from 'geojson';
 
-const GAODE_GEOCODE_URL = '/api/gaode/geocode';
-const GAODE_POI_URL = '/api/gaode/poi';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
+const GAODE_GEOCODE_URL = `${API_BASE}/api/gaode/geocode`;
+const GAODE_POI_URL = `${API_BASE}/api/gaode/poi`;
 
 /** 高德返回的单个地理编码结果 */
 interface GaodeGeocode {

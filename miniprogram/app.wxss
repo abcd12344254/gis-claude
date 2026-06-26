@@ -1,0 +1,4 @@
+/* 全局样式 - web-view 页面不需要太多样式 */
+page {
+  background: #fff;
+}

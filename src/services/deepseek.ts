@@ -1,5 +1,7 @@
 import axios from 'axios';
 
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
+
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/chat/completions';
 
 const SYSTEM_PROMPT = `你是 GIS Claude，一个专业的地理信息系统（GIS）智能助手。你具备以下能力：
@@ -115,7 +117,7 @@ export async function chatWithDeepSeekProxy(
       headers['Authorization'] = `Bearer ${options.apiKey}`;
     }
     const response = await axios.post(
-      '/api/chat',
+      `${API_BASE}/api/chat`,
       { messages },
       { timeout: 120000, headers }
     );
@@ -156,7 +158,7 @@ export async function chatWithDeepSeekStream(
   }
 
   try {
-    const response = await fetch('/api/chat/stream', {
+    const response = await fetch(`${API_BASE}/api/chat/stream`, {
       method: 'POST',
       headers,
       body: JSON.stringify({ messages }),

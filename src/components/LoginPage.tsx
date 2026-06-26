@@ -12,6 +12,7 @@ import {
   ArrowLeftOutlined,
 } from '@ant-design/icons';
 import { useGISStore } from '../store/useGISStore';
+import { API_BASE } from '../utils/api';
 
 const LoginPage: React.FC = () => {
   const [loading, setLoading] = useState(false);
@@ -51,7 +52,7 @@ const LoginPage: React.FC = () => {
     }
     setSendingCode(true);
     try {
-      const res = await fetch('/api/auth/send-code', {
+      const res = await fetch(`${API_BASE}/api/auth/send-code`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email }),
@@ -81,7 +82,7 @@ const LoginPage: React.FC = () => {
     if (loading) return;  // 防止重复点击导致 409
     setLoading(true);
     try {
-      const verifyRes = await fetch('/api/auth/verify-email', {
+      const verifyRes = await fetch(`${API_BASE}/api/auth/verify-email`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: registerEmail, code: values.code }),
@@ -91,7 +92,7 @@ const LoginPage: React.FC = () => {
         throw new Error(err.detail || `验证失败 (${verifyRes.status})`);
       }
 
-      const regRes = await fetch('/api/auth/register', {
+      const regRes = await fetch(`${API_BASE}/api/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: registerEmail, password: registerPassword }),
@@ -119,7 +120,7 @@ const LoginPage: React.FC = () => {
     if (loading) return;  // 防止重复点击
     setLoading(true);
     try {
-      const res = await fetch('/api/auth/login', {
+      const res = await fetch(`${API_BASE}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(values),

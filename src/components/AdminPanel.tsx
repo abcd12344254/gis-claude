@@ -3,6 +3,7 @@ import { Table, Button, message, Typography, Card, Space, Tag, Modal } from 'ant
 import { DownloadOutlined, ReloadOutlined, UserOutlined, VerifiedOutlined, PlusOutlined, DollarOutlined } from '@ant-design/icons';
 import { useGISStore } from '../store/useGISStore';
 import RechargeModal from './RechargeModal';
+import { API_BASE } from '../utils/api';
 
 const { Text } = Typography;
 
@@ -45,7 +46,7 @@ const AdminPanel: React.FC<{ open: boolean; onClose: () => void }> = ({ open, on
     }
     setLoading(true);
     try {
-      const resp = await fetch('/api/admin/users', {
+      const resp = await fetch(`${API_BASE}/api/admin/users`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!resp.ok) {
@@ -76,7 +77,7 @@ const AdminPanel: React.FC<{ open: boolean; onClose: () => void }> = ({ open, on
     const token = useGISStore.getState().authToken;
     if (!token) { message.error('未登录'); return; }
     try {
-      const resp = await fetch('/api/admin/users/export', {
+      const resp = await fetch(`${API_BASE}/api/admin/users/export`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!resp.ok) throw new Error('导出失败');

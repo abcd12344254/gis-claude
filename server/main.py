@@ -7,7 +7,7 @@ import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException, Query, Header, Depends
+from fastapi import FastAPI, HTTPException, Query, Header, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -49,6 +49,24 @@ from projects import (
     save_layers,
     load_layers,
 )
+from agent.crs_checker import check_analysis_crs, format_crs_report, CRSCheckResult
+from skills.registry import get_skill_registry
+from agent.core import get_gis_agent, AgentRequest, MapState as AgentMapState, LayerSummary
+from mcp.registry import get_mcp_registry
+from mcp.tools_data import register_data_tools
+from mcp.tools_preprocess import register_preprocess_tools
+from mcp.tools_analysis import register_analysis_tools
+import yaml
+
+# ====== MCP 工具初始化 ======
+
+def _init_mcp_tools():
+    """启动时注册全部 MCP 工具"""
+    reg = get_mcp_registry()
+    register_data_tools(reg)
+    register_preprocess_tools(reg)
+    register_analysis_tools(reg)
+    return reg
 
 # ====== Lifespan ======
 
@@ -56,6 +74,7 @@ from projects import (
 async def lifespan(app: FastAPI):
     init_db()
     init_project_tables()
+    _init_mcp_tools()
     yield
 
 app = FastAPI(title="GIS Claude API", version="1.0.0", lifespan=lifespan)
@@ -183,6 +202,291 @@ async def health_check():
         "user_count": user_count,
         "db": "Turso Cloud",
     }
+
+
+# ====== CRS 坐标系检查（文档 4.5.3） ======
+
+class LayerCRSInfo(BaseModel):
+    name: str = ""
+    crs: Optional[str] = None
+    feature_count: int = 0
+    geometry_type: str = ""
+
+class CRSCheckRequest(BaseModel):
+    analysis_type: str  # area / distance / buffer / hotspot / interpolation / ...
+    layers: list[LayerCRSInfo]
+    lng_min: Optional[float] = None
+    lng_max: Optional[float] = None
+
+class CRSWarningSchema(BaseModel):
+    level: str
+    message: str
+    detail: str = ""
+    fix_action: str = ""
+
+class CRSCheckResponse(BaseModel):
+    passed: bool
+    analysis_type: str
+    layers_checked: list[str]
+    warnings: list[CRSWarningSchema]
+    suggested_crs: Optional[str] = None
+    suggested_crs_name: Optional[str] = None
+    report: str
+
+
+@app.post("/api/crs/check", response_model=CRSCheckResponse)
+async def crs_check(request: CRSCheckRequest):
+    """
+    空间分析前的前置 CRS 检查。
+    检查坐标系的隐形陷阱：CRS缺失、地理坐标系误用、多图层不一致、缓冲距离单位不匹配。
+    返回是否通过、警告列表、推荐的中国区域投影坐标系。
+    """
+    layers_info = [
+        {
+            "name": l.name,
+            "crs": l.crs,
+            "feature_count": l.feature_count,
+            "geometry_type": l.geometry_type,
+        }
+        for l in request.layers
+    ]
+
+    lng_range = None
+    if request.lng_min is not None and request.lng_max is not None:
+        lng_range = (request.lng_min, request.lng_max)
+
+    result = check_analysis_crs(
+        analysis_type=request.analysis_type,
+        layers_info=layers_info,
+        lng_range=lng_range,
+    )
+
+    report = format_crs_report(result)
+
+    return CRSCheckResponse(
+        passed=result.passed,
+        analysis_type=result.analysis_type,
+        layers_checked=result.layers_checked,
+        warnings=[
+            CRSWarningSchema(
+                level=w.level,
+                message=w.message,
+                detail=w.detail,
+                fix_action=w.fix_action,
+            )
+            for w in result.warnings
+        ],
+        suggested_crs=result.suggested_crs,
+        suggested_crs_name=result.suggested_crs_name,
+        report=report,
+    )
+
+
+# ====== Skill 系统 ======
+
+@app.get("/api/skills")
+async def list_skills():
+    """列出所有已加载的 Skill（含触发词和依赖）"""
+    registry = get_skill_registry()
+    return registry.list_all()
+
+
+@app.get("/api/skills/match")
+async def match_skills(q: str = ""):
+    """根据用户消息匹配相关 Skill（必须在 /api/skills/{name} 之前注册）"""
+    if not q:
+        return []
+    registry = get_skill_registry()
+    matched = registry.match(q)
+    return [
+        {"name": s.name, "description": s.description, "triggers": s.triggers}
+        for s in matched
+    ]
+
+
+@app.get("/api/skills/prompt")
+async def get_system_prompt():
+    """获取由全部 Skill 拼装而成的 System Prompt（必须在 /api/skills/{name} 之前注册）"""
+    registry = get_skill_registry()
+    prompt = registry.build_system_prompt()
+    return {"prompt": prompt, "length": len(prompt)}
+
+
+@app.get("/api/skills/{name}")
+async def get_skill(name: str):
+    """获取单个 Skill 的完整内容"""
+    registry = get_skill_registry()
+    skill = registry.get(name)
+    if not skill:
+        raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
+    return {
+        "name": skill.name,
+        "version": skill.version,
+        "description": skill.description,
+        "triggers": skill.triggers,
+        "dependencies": skill.dependencies,
+        "body": skill.body,
+    }
+
+
+# ====== Agent 对话端点（Skill 增强） ======
+
+class AgentChatRequest(BaseModel):
+    message: str
+    map_state: dict  # {center: [lng,lat], zoom, bounds: [w,s,e,n]|null}
+    layers: list[dict] = []  # [{id, name, type, visible, feature_count}]
+    history: list[dict] = []  # [{role, content}]
+
+
+@app.post("/api/agent/chat")
+async def agent_chat(request: AgentChatRequest, user=Depends(get_current_user)):
+    """Agent 对话（非流式）—— Skill 增强 System Prompt"""
+    reset_daily_quota_if_needed(user)
+    remaining = increment_quota(user["id"])
+    if remaining < 0:
+        raise HTTPException(status_code=429, detail="今日配额已用完，请明天再试")
+
+    agent = get_gis_agent()
+
+    ms = request.map_state
+    agent_request = AgentRequest(
+        message=request.message,
+        map_state=AgentMapState(
+            center=ms.get("center", [116.4, 39.9]),
+            zoom=ms.get("zoom", 11),
+            bounds=ms.get("bounds"),
+        ),
+        layers=[LayerSummary(**l) for l in request.layers],
+        history=request.history,
+    )
+
+    response = await agent.chat(agent_request, auth_token=user.get("id", ""))
+    return response
+
+
+@app.post("/api/agent/chat/stream")
+async def agent_chat_stream(request: AgentChatRequest, user=Depends(get_current_user)):
+    """Agent 对话（SSE 流式）—— Skill 增强 System Prompt"""
+    reset_daily_quota_if_needed(user)
+    remaining = increment_quota(user["id"])
+    if remaining < 0:
+        raise HTTPException(status_code=429, detail="今日配额已用完，请明天再试")
+
+    agent = get_gis_agent()
+
+    ms = request.map_state
+    agent_request = AgentRequest(
+        message=request.message,
+        map_state=AgentMapState(
+            center=ms.get("center", [116.4, 39.9]),
+            zoom=ms.get("zoom", 11),
+            bounds=ms.get("bounds"),
+        ),
+        layers=[LayerSummary(**l) for l in request.layers],
+        history=request.history,
+    )
+
+    return StreamingResponse(
+        agent.chat_stream(agent_request, auth_token=user.get("id", "")),
+        media_type="text/event-stream",
+    )
+
+
+# ====== 资源目录（文档 3.2） ======
+
+_RESOURCE_CATALOG_PATH = os.path.join(os.path.dirname(__file__), "resources", "catalog.yaml")
+
+
+@app.get("/api/resources")
+async def list_resources(keywords: str = "", category: str = ""):
+    """列出资源清单，支持关键词和数据分类筛选"""
+    try:
+        with open(_RESOURCE_CATALOG_PATH, "r", encoding="utf-8") as f:
+            catalog = yaml.safe_load(f)
+    except Exception:
+        return {"resources": [], "error": "资源清单文件未找到"}
+
+    resources = catalog.get("resources", [])
+    if keywords:
+        kw_lower = keywords.lower()
+        resources = [
+            r for r in resources
+            if kw_lower in r.get("resource_name", "").lower()
+            or kw_lower in r.get("description", "").lower()
+            or any(kw_lower in tag for tag in r.get("data_category", "").lower().split(","))
+        ]
+    if category:
+        resources = [r for r in resources if r.get("data_category") == category]
+
+    return {"resources": resources, "total": len(resources)}
+
+
+@app.get("/api/resources/{name}")
+async def get_resource_handle(name: str):
+    """获取单个资源的完整信息（含访问句柄）"""
+    try:
+        with open(_RESOURCE_CATALOG_PATH, "r", encoding="utf-8") as f:
+            catalog = yaml.safe_load(f)
+    except Exception:
+        raise HTTPException(status_code=404, detail="资源清单文件未找到")
+
+    for r in catalog.get("resources", []):
+        if r.get("resource_id") == name or r.get("resource_name") == name:
+            return r
+
+    raise HTTPException(status_code=404, detail=f"资源 '{name}' 未找到")
+
+
+# ====== MCP 工具端点（文档 7.1-7.4） ======
+
+@app.get("/api/mcp/tools")
+async def mcp_list_tools(category: str = ""):
+    """列出所有已注册的 MCP 工具"""
+    reg = get_mcp_registry()
+    if category:
+        return reg.list_by_category(category)
+    return reg.list_all()
+
+
+@app.get("/api/mcp/tools/llm")
+async def mcp_tools_for_llm():
+    """返回 LLM function calling 格式的工具列表"""
+    reg = get_mcp_registry()
+    return reg.build_tool_list_for_llm()
+
+
+@app.get("/api/mcp/tools/{name}")
+async def mcp_get_tool(name: str):
+    """获取单个 MCP 工具的详细定义"""
+    reg = get_mcp_registry()
+    tool = reg.get(name)
+    if not tool:
+        raise HTTPException(status_code=404, detail=f"MCP 工具 '{name}' 未找到")
+    return {
+        "name": tool.name,
+        "description": tool.description,
+        "category": tool.category,
+        "parameters": tool.parameters,
+        "returns": tool.returns,
+        "requires_crs_check": tool.requires_crs_check,
+        "examples": tool.examples,
+    }
+
+
+@app.post("/api/mcp/call")
+async def mcp_call_tool(request: Request):
+    """直接调用指定的 MCP 工具（接收 JSON body: {name, params}）"""
+    import traceback
+    body = await request.json()
+    name = body.get("name", "")
+    params = body.get("params", {})
+    reg = get_mcp_registry()
+    try:
+        result = await reg.execute(name, params)
+        return result
+    except Exception as e:
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
 
 
 # ====== Auth ======
