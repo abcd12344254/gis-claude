@@ -56,6 +56,9 @@ from mcp.registry import get_mcp_registry
 from mcp.tools_data import register_data_tools
 from mcp.tools_preprocess import register_preprocess_tools
 from mcp.tools_analysis import register_analysis_tools
+from mcp.tools_cartography import register_cartography_tools
+from mcp.tools_code_exec import register_code_exec_tools
+from mcp.tools_rag import register_rag_tools
 import yaml
 
 # ====== MCP 工具初始化 ======
@@ -66,7 +69,31 @@ def _init_mcp_tools():
     register_data_tools(reg)
     register_preprocess_tools(reg)
     register_analysis_tools(reg)
+    register_cartography_tools(reg)
+    register_code_exec_tools(reg)
+    register_rag_tools(reg)
+    _init_rag_knowledge()
     return reg
+
+
+def _init_rag_knowledge():
+    """启动时自动将 Skills 文件导入 RAG 知识库"""
+    try:
+        from rag.vector_store import get_collection, _COLLECTION_KNOWLEDGE
+        col = get_collection(_COLLECTION_KNOWLEDGE)
+        if col.count() > 0:
+            return  # 已经导入过，跳过
+
+        skills_dir = Path(__file__).parent / "skills"
+        for md_file in skills_dir.glob("*.md"):
+            try:
+                from rag.vector_store import ingest_file
+                n = ingest_file(str(md_file), _COLLECTION_KNOWLEDGE)
+                print(f"  [RAG] ingested {md_file.name}: {n} chunks")
+            except Exception as e:
+                print(f"  [RAG] skip {md_file.name}: {e}")
+    except Exception as e:
+        print(f"  [RAG] init skipped: {e}")
 
 # ====== Lifespan ======
 

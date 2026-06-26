@@ -1,24 +1,32 @@
 """
 ====== 空间分析 MCP 工具 ======
 
-与 HermesAgent 文档 4.4 和 7.3 节规范对齐。
-每个分析工具自动执行 CRS 前置检查。
-
-当前状态：
-- 工具 schema 完整注册，LLM 可发现
-- 需要 geopandas/shapely 后端的操作返回 Python 代码模板
-- 无依赖的操作（bbox/centroid/参数推荐）直接执行
+geopandas + shapely 实际执行后端。
+自动执行 CRS 前置检查，返回实际分析结果。
 """
 
+import json
+from pathlib import Path
 from mcp.registry import MCPToolDef
 from agent.crs_checker import check_analysis_crs, format_crs_report
+import geopandas as gpd
+from shapely.geometry import box, shape, Point as ShapelyPoint
+from shapely import wkt
+import numpy as np
 
 
-# ====== 分析工具处理函数的通用模式 ======
+def _read_data(source: str) -> gpd.GeoDataFrame:
+    """读取数据：支持文件路径（相对或绝对）"""
+    src = Path(source)
+    if not src.is_absolute():
+        src = Path(__file__).parent.parent.parent / src
+    if not src.exists():
+        raise FileNotFoundError(f"数据文件不存在: {src}")
+    return gpd.read_file(str(src))
+
 
 def _crs_check_and_advise(analysis_type: str, layers_info: list[dict],
                           lng_range: tuple = None) -> dict:
-    """执行 CRS 检查并返回建议"""
     result = check_analysis_crs(analysis_type, layers_info, lng_range)
     return {
         "crs_passed": result.passed,
@@ -27,591 +35,401 @@ def _crs_check_and_advise(analysis_type: str, layers_info: list[dict],
             for w in result.warnings
         ],
         "suggested_crs": result.suggested_crs,
-        "suggested_crs_name": result.suggested_crs_name,
         "crs_report": format_crs_report(result),
     }
 
 
-def _analysis_template(operation: str, params_desc: str, code: str) -> dict:
-    """生成需 geopandas 的分析操作的 Python 代码模板"""
-    return {
-        "status": "template",
-        "message": f"此分析需要 geopandas/shapely 后端。当前提供 Python 代码模板，可在本地 Jupyter 中执行。",
-        "operation": operation,
-        "parameters": params_desc,
-        "python_code_template": code.strip(),
-        "requires": ["geopandas", "shapely"],
-    }
+def _auto_project(gdf: gpd.GeoDataFrame, suggested_crs: str = None) -> gpd.GeoDataFrame:
+    """自动转换地理坐标系到投影坐标系"""
+    if gdf.crs and gdf.crs.is_geographic:
+        target = suggested_crs or "EPSG:32650"
+        return gdf.to_crs(target)
+    return gdf
 
 
-def register_analysis_tools(registry):
-    """向注册中心注册所有空间分析 MCP 工具"""
-
-    # ── buffer_analysis ──
-    registry.register(MCPToolDef(
-        name="buffer_analysis",
-        description="缓冲区分析：创建要素周围指定距离的缓冲区域。缓冲区分析前必须检查 CRS——地理坐标系下缓冲距离单位为度，结果严重失真。",
-        category="analysis",
-        parameters={
-            "source_layer": {"type": "string", "required": True, "description": "源图层名称或资源路径"},
-            "distance_km": {"type": "number", "required": False, "default": 5, "description": "缓冲距离（公里），默认5km，支持0.1-100km"},
-            "unit": {"type": "string", "required": False, "default": "km", "enum": ["km", "m"], "description": "距离单位"},
-        },
-        returns={"type": "object", "description": "{result, crs_check, python_code_template}"},
-        requires_crs_check=True,
-        examples=['{"source_layer": "北京市", "distance_km": 3}'],
-        handler=lambda p: _buffer_handler(p),
-    ))
-
-    # ── overlay_analysis ──
-    registry.register(MCPToolDef(
-        name="overlay_analysis",
-        description="叠加分析：对两个图层执行空间叠置操作（相交/并集/差集/对称差）。多图层操作前必须检查 CRS 一致性。",
-        category="analysis",
-        parameters={
-            "layer_a": {"type": "string", "required": True, "description": "图层 A 名称"},
-            "layer_b": {"type": "string", "required": True, "description": "图层 B 名称"},
-            "operation": {"type": "string", "required": True,
-                          "enum": ["intersect", "union", "difference", "symmetric_difference"],
-                          "description": "叠置操作类型"},
-        },
-        returns={"type": "object", "description": "{result, crs_check, python_code_template}"},
-        requires_crs_check=True,
-        examples=['{"layer_a": "武汉市", "layer_b": "湖泊", "operation": "intersect"}'],
-        handler=lambda p: _overlay_handler(p),
-    ))
-
-    # ── spatial_query ──
-    registry.register(MCPToolDef(
-        name="spatial_query",
-        description="空间查询：基于空间关系（包含/相交/邻近）从图层中筛选要素。",
-        category="analysis",
-        parameters={
-            "source_layer": {"type": "string", "required": True, "description": "源图层名称"},
-            "query_geometry": {"type": "string", "required": True, "description": "查询几何（WKT或bbox 'w,s,e,n'）"},
-            "relation": {"type": "string", "required": False, "default": "intersects",
-                         "enum": ["contains", "intersects", "within", "touches", "nearby"],
-                         "description": "空间关系"},
-            "distance_m": {"type": "number", "required": False, "description": "邻近距离(米)，仅 nearby"},
-        },
-        returns={"type": "object", "description": "{matched_count, python_code_template}"},
-        requires_crs_check=False,
-        examples=['{"source_layer": "POI", "query_geometry": "114.2,30.5,114.5,30.7"}'],
-        handler=lambda p: _spatial_query_handler(p),
-    ))
-
-    # ── distance_calculation ──
-    registry.register(MCPToolDef(
-        name="distance_calculation",
-        description="距离计算：计算两个要素之间的最短距离。经纬度坐标需转换为投影坐标系以保证距离精度。",
-        category="analysis",
-        parameters={
-            "layer_a": {"type": "string", "required": True, "description": "源图层 A 名称"},
-            "layer_b": {"type": "string", "required": False, "description": "源图层 B 名称（不填则计算A内各要素间距离）"},
-            "method": {"type": "string", "required": False, "default": "euclidean",
-                       "enum": ["euclidean", "haversine"], "description": "距离计算方法：haversine(球面,适合经纬度) / euclidean(平面,适合投影坐标系)"},
-        },
-        returns={"type": "object", "description": "{distance, unit, method, python_code_template}"},
-        requires_crs_check=True,
-        examples=['{"layer_a": "武汉大学", "layer_b": "华中科技大学", "method": "haversine"}'],
-        handler=lambda p: _distance_handler(p),
-    ))
-
-    # ── centroid_calculation ──
-    registry.register(MCPToolDef(
-        name="centroid_calculation",
-        description="质心计算：计算要素的几何中心点。返回质心坐标。可在任何坐标系下执行。",
-        category="analysis",
-        parameters={
-            "source_layer": {"type": "string", "required": True, "description": "图层名称"},
-        },
-        returns={"type": "object", "description": "{centroids: [{name, coordinates}], count}"},
-        requires_crs_check=False,
-        examples=['{"source_layer": "北京市"}'],
-        handler=lambda p: _simple_analysis_handler(p, "centroid"),
-    ))
-
-    # ── area_calculation ──
-    registry.register(MCPToolDef(
-        name="area_calculation",
-        description="面积计算：计算多边形要素的面积。**必须在投影坐标系下执行**——经纬度直接计算面积误差可达50%+。",
-        category="analysis",
-        parameters={
-            "source_layer": {"type": "string", "required": True, "description": "图层名称"},
-            "unit": {"type": "string", "required": False, "default": "km2",
-                     "enum": ["km2", "m2", "mu"], "description": "面积单位（mu=亩）"},
-        },
-        returns={"type": "object", "description": "{areas: [{name, area, unit}], total_area, python_code_template}"},
-        requires_crs_check=True,
-        examples=['{"source_layer": "武汉市", "unit": "km2"}'],
-        handler=lambda p: _area_handler(p),
-    ))
-
-    # ── bounding_box ──
-    registry.register(MCPToolDef(
-        name="bounding_box",
-        description="边界框计算：计算要素的外接矩形。返回 bbox [west, south, east, north]。",
-        category="analysis",
-        parameters={
-            "source_layer": {"type": "string", "required": True, "description": "图层名称"},
-        },
-        returns={"type": "object", "description": "{bbox: [w,s,e,n], center: [lng,lat]}"},
-        requires_crs_check=False,
-        examples=['{"source_layer": "武汉市"}'],
-        handler=lambda p: _simple_analysis_handler(p, "bbox"),
-    ))
-
-    # ── simplify_geometry ──
-    registry.register(MCPToolDef(
-        name="simplify_geometry",
-        description="几何简化：减少要素顶点数，保持基本形状。使用 Douglas-Peucker 算法。",
-        category="analysis",
-        parameters={
-            "source_layer": {"type": "string", "required": True, "description": "图层名称"},
-            "tolerance": {"type": "number", "required": False, "default": 0.001,
-                          "description": "简化容差（度），值越大越简化"},
-        },
-        returns={"type": "object", "description": "{original_vertex_count, simplified_vertex_count, python_code_template}"},
-        requires_crs_check=False,
-        examples=['{"source_layer": "武汉市", "tolerance": 0.005}'],
-        handler=lambda p: _simple_analysis_handler(p, "simplify"),
-    ))
-
-    # ── convex_hull ──
-    registry.register(MCPToolDef(
-        name="convex_hull",
-        description="凸包分析：计算几何要素的最小凸包（外接凸多边形）。",
-        category="analysis",
-        parameters={
-            "source_layer": {"type": "string", "required": True, "description": "点或面图层名称"},
-        },
-        returns={"type": "object", "description": "{python_code_template}"},
-        requires_crs_check=False,
-        examples=['{"source_layer": "POI点"}'],
-        handler=lambda p: _simple_analysis_handler(p, "convex_hull"),
-    ))
-
-    # ── create_grid ──
-    registry.register(MCPToolDef(
-        name="create_grid",
-        description="渔网格网生成：在研究区域内创建矩形网格。格网大小单位为公里，需要投影坐标系。",
-        category="analysis",
-        parameters={
-            "source_layer": {"type": "string", "required": False, "description": "区域图层名称（可选，不填则使用当前视野）"},
-            "cell_size_km": {"type": "number", "required": False, "default": 10, "description": "格网单元格大小（公里）"},
-        },
-        returns={"type": "object", "description": "{grid_count, cell_size, python_code_template}"},
-        requires_crs_check=True,
-        examples=['{"cell_size_km": 5}'],
-        handler=lambda p: _grid_handler(p),
-    ))
-
-    # ── density_analysis ──
-    registry.register(MCPToolDef(
-        name="density_analysis",
-        description="点密度分析：基于点要素计算单位面积的密度。自动将非点要素转为质心。",
-        category="analysis",
-        parameters={
-            "source_layer": {"type": "string", "required": True, "description": "点要素图层名称"},
-            "cell_size_km": {"type": "number", "required": False, "default": 1, "description": "格网大小（公里）"},
-        },
-        returns={"type": "object", "description": "{density_map, python_code_template}"},
-        requires_crs_check=True,
-        examples=['{"source_layer": "POI"}'],
-        handler=lambda p: _density_handler(p),
-    ))
-
-    # ── cluster_analysis ──
-    registry.register(MCPToolDef(
-        name="cluster_analysis",
-        description="空间聚类分析：使用 DBSCAN 算法对点要素进行密度聚类。eps 参数单位为公里，需要投影坐标系。",
-        category="analysis",
-        parameters={
-            "source_layer": {"type": "string", "required": True, "description": "点要素图层名称"},
-            "eps_km": {"type": "number", "required": False, "default": 1.0, "description": "聚类半径（公里）"},
-            "min_points": {"type": "integer", "required": False, "default": 3, "description": "最小点数"},
-        },
-        returns={"type": "object", "description": "{cluster_count, noise_count, python_code_template}"},
-        requires_crs_check=True,
-        examples=['{"source_layer": "POI", "eps_km": 2}'],
-        handler=lambda p: _cluster_handler(p),
-    ))
-
-    # ── hotspot_analysis ──
-    registry.register(MCPToolDef(
-        name="hotspot_analysis",
-        description="Getis-Ord Gi* 热点分析：识别具有统计显著性的空间聚类热点和冷点。需要投影坐标系。",
-        category="analysis",
-        parameters={
-            "source_layer": {"type": "string", "required": True, "description": "点要素图层名称"},
-            "value_field": {"type": "string", "required": False, "description": "分析字段（不填则使用密度）"},
-            "bandwidth_km": {"type": "number", "required": False, "description": "空间权重矩阵带宽（不填则自动计算）"},
-        },
-        returns={"type": "object", "description": "{hotspots: [{coordinates, z_score, p_value, category}], summary, python_code_template}"},
-        requires_crs_check=True,
-        examples=['{"source_layer": "犯罪点", "bandwidth_km": 2}'],
-        handler=lambda p: _hotspot_handler(p),
-    ))
-
-    # ── interpolation_analysis ──
-    registry.register(MCPToolDef(
-        name="interpolation_analysis",
-        description="空间插值：基于已知点要素的数值字段，预测未知位置的数值（IDW 反距离加权法）。需要投影坐标系。",
-        category="analysis",
-        parameters={
-            "source_layer": {"type": "string", "required": True, "description": "含数值字段的点要素图层名称"},
-            "value_field": {"type": "string", "required": True, "description": "插值字段（数值型）"},
-            "method": {"type": "string", "required": False, "default": "idw",
-                       "enum": ["idw", "kriging", "spline"], "description": "插值方法"},
-            "resolution_km": {"type": "number", "required": False, "default": 1.0, "description": "输出栅格分辨率（公里）"},
-        },
-        returns={"type": "object", "description": "{interpolation_result, python_code_template, method_recommendation}"},
-        requires_crs_check=True,
-        examples=['{"source_layer": "气象站", "value_field": "temperature", "method": "idw"}'],
-        handler=lambda p: _interpolation_handler(p),
-    ))
-
-    # ── zonal_statistics ──
-    registry.register(MCPToolDef(
-        name="zonal_statistics",
-        description="分区统计：按区域图层汇总点图层的数值字段（计数/求和/均值/最大/最小/标准差）。",
-        category="analysis",
-        parameters={
-            "zone_layer": {"type": "string", "required": True, "description": "分区面图层名称"},
-            "points_layer": {"type": "string", "required": True, "description": "点要素图层名称"},
-            "value_field": {"type": "string", "required": True, "description": "汇总字段（数值型）"},
-            "stats": {"type": "array", "required": False, "description": "统计类型：count/sum/mean/min/max/std"},
-        },
-        returns={"type": "object", "description": "{zone_stats: [{zone_name, count, sum, mean, ...}], python_code_template}"},
-        requires_crs_check=True,
-        examples=['{"zone_layer": "行政区", "points_layer": "POI", "value_field": "population"}'],
-        handler=lambda p: _zonal_handler(p),
-    ))
-
-    # ── suitability_analysis ──
-    registry.register(MCPToolDef(
-        name="suitability_analysis",
-        description="适宜性评价：多因子加权叠加。各因子图层统一 CRS、标准化后加权求和。权重自动归一化（和为1）。",
-        category="analysis",
-        parameters={
-            "factors": {"type": "array", "required": True, "description": "因子列表 [{layer, weight, reclass_method}]"},
-            "output_classes": {"type": "integer", "required": False, "default": 5, "description": "输出适宜性分级数"},
-        },
-        returns={"type": "object", "description": "{suitability_scores, classification, python_code_template}"},
-        requires_crs_check=True,
-        examples=['{"factors": [{"layer": "距道路距离", "weight": 0.3}, {"layer": "坡度", "weight": 0.4}]}'],
-        handler=lambda p: _suitability_handler(p),
-    ))
+def _result_dict(gdf: gpd.GeoDataFrame, **extra) -> dict:
+    """将 GeoDataFrame 转为 GeoJSON FeatureCollection"""
+    fc = json.loads(gdf.to_json())
+    return {"geojson": fc, "feature_count": len(gdf), **extra}
 
 
-# ====== 工具处理函数 ======
+# ====== 工具函数 ======
 
 async def _buffer_handler(params: dict) -> dict:
     src = params["source_layer"]
-    dist = params.get("distance_km", 5)
+    dist_km = params.get("distance_km", 5)
     unit = params.get("unit", "km")
-    dist_m = dist * 1000 if unit == "km" else dist
+    dist_m = dist_km * 1000 if unit == "km" else dist_km
 
-    crs_check = _crs_check_and_advise("buffer", [{"name": src, "crs": None}])
+    gdf = _read_data(src)
+    crs_info = _crs_check_and_advise("buffer", [{"name": src, "crs": str(gdf.crs)}])
+    gdf = _auto_project(gdf, crs_info.get("suggested_crs"))
 
-    code = f"""
-import geopandas as gpd
-gdf = gpd.read_file("{src}")
-# 确保投影坐标系（建议: {crs_check.get('suggested_crs', 'EPSG:32650')}）
-if gdf.crs and gdf.crs.is_geographic:
-    gdf = gdf.to_crs("{crs_check.get('suggested_crs', 'EPSG:32650')}")
-buffer = gdf.buffer({dist_m})  # {dist}{unit} → {dist_m}米
-print(f"缓冲区分析完成: {len(buffer)} 个缓冲区域")
-"""
-    return {**_analysis_template("buffer", f"距离={dist}{unit}", code),
-            "crs_check": crs_check}
+    gdf["geometry"] = gdf.geometry.buffer(dist_m)
+    return {**_result_dict(gdf), "crs_check": crs_info, "buffer_distance_m": dist_m}
 
 
 async def _overlay_handler(params: dict) -> dict:
-    layer_a = params["layer_a"]
-    layer_b = params["layer_b"]
+    a_src = params["layer_a"]
+    b_src = params["layer_b"]
     op = params["operation"]
 
-    crs_check = _crs_check_and_advise("overlay", [
-        {"name": layer_a, "crs": None}, {"name": layer_b, "crs": None}
+    gdf_a = _read_data(a_src)
+    gdf_b = _read_data(b_src)
+
+    crs_info = _crs_check_and_advise("overlay", [
+        {"name": a_src, "crs": str(gdf_a.crs)},
+        {"name": b_src, "crs": str(gdf_b.crs)},
     ])
 
-    operation_map = {
+    if gdf_a.crs != gdf_b.crs:
+        gdf_b = gdf_b.to_crs(gdf_a.crs)
+
+    op_map = {
         "intersect": "intersection", "union": "union",
         "difference": "difference", "symmetric_difference": "symmetric_difference"
     }
-    gpdfn = operation_map.get(op, "intersection")
-
-    code = f"""
-import geopandas as gpd
-a = gpd.read_file("{layer_a}")
-b = gpd.read_file("{layer_b}")
-# 检查 CRS 一致性
-if a.crs != b.crs:
-    b = b.to_crs(a.crs)
-result = a.{gpdfn}(b)
-print(f"叠加分析完成: {len(result)} 个结果要素")
-"""
-    return {**_analysis_template(f"overlay_{op}", f"{layer_a} {op} {layer_b}", code),
-            "crs_check": crs_check}
+    result = getattr(gdf_a, op_map[op])(gdf_b)
+    return {**_result_dict(gpd.GeoDataFrame(geometry=[result] if not isinstance(result, gpd.GeoDataFrame) else result.geometry, crs=gdf_a.crs)),
+            "crs_check": crs_info, "operation": op}
 
 
 async def _spatial_query_handler(params: dict) -> dict:
     src = params["source_layer"]
-    relation = params.get("relation", "intersects")
     query_geo = params["query_geometry"]
+    relation = params.get("relation", "intersects")
 
-    code = f"""
-import geopandas as gpd
-from shapely import wkt
-gdf = gpd.read_file("{src}")
-query = wkt.loads("{query_geo}") if "{query_geo}".startswith("PO") else None
-if query is None:
-    from shapely.geometry import box
-    query = box(*map(float, "{query_geo}".split(",")))
-if "{relation}" == "nearby":
-    matched = gdf[gdf.distance(query) < {params.get('distance_m', 1000)}]
-else:
-    matched = gdf[getattr(gdf.geometry, "{relation}")(query)]
-print(f"空间查询: {len(matched)} 个匹配要素")
-"""
-    return _analysis_template("spatial_query", f"{src} {relation} query", code)
+    gdf = _read_data(src)
+
+    # 解析查询几何
+    if "," in query_geo and query_geo.count(",") == 3:
+        w, s, e, n = map(float, query_geo.split(","))
+        query = box(w, s, e, n)
+    else:
+        query = wkt.loads(query_geo)
+
+    if relation == "nearby":
+        dist = params.get("distance_m", 1000)
+        matched = gdf[gdf.distance(query) < dist]
+    else:
+        matched = gdf[getattr(gdf.geometry, relation)(query)]
+
+    return _result_dict(matched, matched_count=len(matched), relation=relation)
 
 
 async def _distance_handler(params: dict) -> dict:
-    layer_a = params["layer_a"]
-    layer_b = params.get("layer_b", "")
+    a_src = params["layer_a"]
+    b_src = params.get("layer_b", "")
     method = params.get("method", "haversine")
 
-    crs_check = _crs_check_and_advise("distance", [{"name": layer_a, "crs": None}])
+    gdf_a = _read_data(a_src)
+    gdf_b = _read_data(b_src) if b_src else gdf_a
 
-    if method == "haversine":
-        code = f"""
-from math import radians, sin, cos, sqrt, atan2
-def haversine(lng1, lat1, lng2, lat2):
-    R = 6371  # 地球半径（公里）
-    dlat, dlng = radians(lat2-lat1), radians(lng2-lng1)
-    a = sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlng/2)**2
-    return 2*R*atan2(sqrt(a), sqrt(1-a))
-# 计算 {layer_a} 到 {layer_b or '自身'} 的距离
-print(f"距离: {{distance:.2f}} km")
-"""
+    crs_info = _crs_check_and_advise("distance", [{"name": a_src, "crs": str(gdf_a.crs)}])
+
+    if method == "haversine" or (gdf_a.crs and gdf_a.crs.is_geographic):
+        # 球面距离
+        from math import radians, sin, cos, sqrt, atan2
+        def haversine(lng1, lat1, lng2, lat2):
+            R = 6371000
+            dlat, dlng = radians(lat2 - lat1), radians(lng2 - lng1)
+            a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlng / 2) ** 2
+            return 2 * R * atan2(sqrt(a), sqrt(1 - a))
+        c1 = gdf_a.geometry.centroid
+        c2 = gdf_b.geometry.centroid
+        min_dist = min(haversine(c1.x.iloc[0], c1.y.iloc[0], c2.x.iloc[j], c2.y.iloc[j])
+                       for j in range(len(c2)))
+        return {"distance_m": min_dist, "distance_km": min_dist / 1000, "unit": "m", "method": "haversine", "crs_check": crs_info}
     else:
-        code = f"""
-import geopandas as gpd
-a = gpd.read_file("{layer_a}")
-{'b = gpd.read_file("' + layer_b + '")' if layer_b else ''}
-if a.crs and a.crs.is_geographic:
-    a = a.to_crs("{crs_check.get('suggested_crs', 'EPSG:32650')}")
-distance = a.distance(b).min()
-print(f"距离: {{distance/1000:.2f}} km")
-"""
+        gdf_a = _auto_project(gdf_a, crs_info.get("suggested_crs"))
+        gdf_b = _auto_project(gdf_b, crs_info.get("suggested_crs"))
+        min_dist = gdf_a.distance(gdf_b).min()
+        return {"distance_m": min_dist, "distance_km": min_dist / 1000, "unit": "m", "method": "euclidean", "crs_check": crs_info}
 
-    return {**_analysis_template("distance", f"{layer_a} → {layer_b}", code),
-            "crs_check": crs_check, "method_used": method}
+
+async def _centroid_handler(params: dict) -> dict:
+    src = params["source_layer"]
+    gdf = _read_data(src)
+    centroids = gdf.centroid
+    coords = [(c.x, c.y) for c in centroids]
+    return {"centroids": coords, "count": len(coords)}
 
 
 async def _area_handler(params: dict) -> dict:
     src = params["source_layer"]
     unit = params.get("unit", "km2")
+    gdf = _read_data(src)
+    crs_info = _crs_check_and_advise("area", [{"name": src, "crs": str(gdf.crs)}])
+    gdf = _auto_project(gdf, crs_info.get("suggested_crs"))
+    area_m2 = gdf.geometry.area.sum()
+    area_km2 = area_m2 / 1e6
+    return {
+        "area_m2": area_m2, "area_km2": area_km2, "area_mu": area_km2 * 1500,
+        "crs_check": crs_info, "unit": unit,
+    }
 
-    crs_check = _crs_check_and_advise("area", [{"name": src, "crs": None}])
 
-    code = f"""
-import geopandas as gpd
-gdf = gpd.read_file("{src}")
-if gdf.crs and gdf.crs.is_geographic:
-    gdf = gdf.to_crs("{crs_check.get('suggested_crs', 'EPSG:32650')}")
-area_m2 = gdf.geometry.area
-area_km2 = area_m2 / 1_000_000
-area_mu = area_km2 * 1500  # 亩
-print(f"总面积: {{area_km2.sum():.2f}} km² = {{area_mu.sum():.0f}} 亩")
-"""
-    return {**_analysis_template("area", f"{src} unit={unit}", code),
-            "crs_check": crs_check}
+async def _bbox_handler(params: dict) -> dict:
+    src = params["source_layer"]
+    gdf = _read_data(src)
+    b = gdf.total_bounds
+    return {"bbox": list(b), "center": [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2]}
+
+
+async def _simplify_handler(params: dict) -> dict:
+    src = params["source_layer"]
+    tol = params.get("tolerance", 0.001)
+    gdf = _read_data(src)
+    orig_count = sum(len(g.coords) if hasattr(g, 'coords') else 1 for g in gdf.geometry)
+    gdf["geometry"] = gdf.simplify(tol)
+    new_count = sum(len(g.coords) if hasattr(g, 'coords') else 1 for g in gdf.geometry)
+    return {**_result_dict(gdf), "original_vertices": orig_count, "simplified_vertices": new_count}
+
+
+async def _convex_handler(params: dict) -> dict:
+    src = params["source_layer"]
+    gdf = _read_data(src)
+    hull = gdf.union_all().convex_hull
+    return _result_dict(gpd.GeoDataFrame(geometry=[hull], crs=gdf.crs))
 
 
 async def _grid_handler(params: dict) -> dict:
-    cell_size = params.get("cell_size_km", 10)
-    src = params.get("source_layer", "当前视野")
+    src = params.get("source_layer", "")
+    cell_km = params.get("cell_size_km", 10)
+    if src:
+        gdf = _read_data(src)
+        gdf = _auto_project(gdf)
+        b = gdf.total_bounds
+    else:
+        b = [0, 0, 100000, 100000]
 
-    crs_check = _crs_check_and_advise("grid", [{"name": src, "crs": None}])
-
-    code = f"""
-import geopandas as gpd
-from shapely.geometry import box
-import numpy as np
-# 创建 {cell_size}km 格网
-xmin, ymin, xmax, ymax = (0, 0, 100000, 100000)  # 替换为实际范围
-cells = []
-for x in np.arange(xmin, xmax, {cell_size * 1000}):
-    for y in np.arange(ymin, ymax, {cell_size * 1000}):
-        cells.append(box(x, y, x + {cell_size * 1000}, y + {cell_size * 1000}))
-grid = gpd.GeoDataFrame(geometry=cells, crs="{crs_check.get('suggested_crs', 'EPSG:32650')}")
-print(f"格网生成: {{len(grid)}} 个 {cell_size}km 单元格")
-"""
-    return {**_analysis_template("grid", f"cell={cell_size}km", code),
-            "crs_check": crs_check}
+    cells = []
+    for x in np.arange(b[0], b[2], cell_km * 1000):
+        for y in np.arange(b[1], b[3], cell_km * 1000):
+            cells.append(box(x, y, x + cell_km * 1000, y + cell_km * 1000))
+    grid = gpd.GeoDataFrame(geometry=cells, crs="EPSG:32650")
+    return _result_dict(grid, cell_size_km=cell_km)
 
 
 async def _density_handler(params: dict) -> dict:
     src = params["source_layer"]
-    cell_size = params.get("cell_size_km", 1)
-
-    crs_check = _crs_check_and_advise("density", [{"name": src, "crs": None}])
-
-    code = f"""
-import geopandas as gpd
-import numpy as np
-gdf = gpd.read_file("{src}")
-# 自动转非点为质心
-if not all(gdf.geometry.type.isin(['Point','MultiPoint'])):
-    gdf['geometry'] = gdf.centroid
-if gdf.crs and gdf.crs.is_geographic:
-    gdf = gdf.to_crs("{crs_check.get('suggested_crs', 'EPSG:32650')}")
-# 创建格网并统计每格点数 → 密度
-print("点密度分析完成")
-"""
-    return {**_analysis_template("density", f"cell={cell_size}km", code),
-            "crs_check": crs_check}
+    cell_km = params.get("cell_size_km", 1)
+    gdf = _read_data(src)
+    crs_info = _crs_check_and_advise("density", [{"name": src, "crs": str(gdf.crs)}])
+    gdf = _auto_project(gdf, crs_info.get("suggested_crs"))
+    if not all(gdf.geometry.geom_type.isin(["Point", "MultiPoint"])):
+        gdf["geometry"] = gdf.centroid
+    b = gdf.total_bounds
+    cells = []
+    vals = []
+    for x in np.arange(b[0], b[2], cell_km * 1000):
+        for y in np.arange(b[1], b[3], cell_km * 1000):
+            cell = box(x, y, x + cell_km * 1000, y + cell_km * 1000)
+            count = sum(gdf.within(cell))
+            cells.append(cell)
+            vals.append(count)
+    result_gdf = gpd.GeoDataFrame({"density": vals}, geometry=cells, crs=gdf.crs)
+    return {**_result_dict(result_gdf), "crs_check": crs_info, "cell_size_km": cell_km}
 
 
 async def _cluster_handler(params: dict) -> dict:
     src = params["source_layer"]
     eps_km = params.get("eps_km", 1.0)
     min_pts = params.get("min_points", 3)
-
-    crs_check = _crs_check_and_advise("cluster", [{"name": src, "crs": None}])
-
-    code = f"""
-import geopandas as gpd
-from sklearn.cluster import DBSCAN
-import numpy as np
-gdf = gpd.read_file("{src}")
-# 提取坐标
-coords = np.array([[g.x, g.y] for g in gdf.geometry])
-# DBSCAN: eps={eps_km}km={eps_km*1000}m
-cluster = DBSCAN(eps={eps_km*1000}, min_samples={min_pts}).fit(coords)
-gdf['cluster'] = cluster.labels_
-n_clusters = len(set(cluster.labels_)) - (1 if -1 in cluster.labels_ else 0)
-n_noise = sum(cluster.labels_ == -1)
-print(f"聚类完成: {{n_clusters}} 个簇, {{n_noise}} 个噪声点")
-"""
-    return {**_analysis_template("cluster_dbscan", f"eps={eps_km}km, min_pts={min_pts}", code),
-            "crs_check": crs_check}
+    gdf = _read_data(src)
+    crs_info = _crs_check_and_advise("cluster", [{"name": src, "crs": str(gdf.crs)}])
+    gdf = _auto_project(gdf, crs_info.get("suggested_crs"))
+    coords = np.array([[g.x, g.y] for g in gdf.geometry])
+    from sklearn.cluster import DBSCAN
+    cluster = DBSCAN(eps=eps_km * 1000, min_samples=min_pts).fit(coords)
+    gdf["cluster"] = cluster.labels_
+    n_clusters = len(set(cluster.labels_)) - (1 if -1 in cluster.labels_ else 0)
+    n_noise = int(sum(cluster.labels_ == -1))
+    return {**_result_dict(gdf), "cluster_count": n_clusters, "noise_count": n_noise, "crs_check": crs_info}
 
 
 async def _hotspot_handler(params: dict) -> dict:
     src = params["source_layer"]
-    value_field = params.get("value_field", "")
-    bandwidth = params.get("bandwidth_km", 0)
-
-    crs_check = _crs_check_and_advise("hotspot", [{"name": src, "crs": None}])
-
-    code = f"""
-import geopandas as gpd
-import numpy as np
-# Getis-Ord Gi* 局部空间自相关
-gdf = gpd.read_file("{src}")
-# 需要 pysal/esda 或手动实现
-print("热点分析完成")
-"""
-    return {**_analysis_template("hotspot_getis_ord", src, code),
-            "crs_check": crs_check}
+    gdf = _read_data(src)
+    crs_info = _crs_check_and_advise("hotspot", [{"name": src, "crs": str(gdf.crs)}])
+    gdf = _auto_project(gdf, crs_info.get("suggested_crs"))
+    coords = np.array([[g.x, g.y] for g in gdf.geometry])
+    n = len(coords)
+    # 简化版 Getis-Ord Gi*
+    z_scores = np.zeros(n)
+    for i in range(n):
+        dists = np.sqrt(((coords - coords[i]) ** 2).sum(axis=1))
+        neighbors = np.where(dists < np.percentile(dists, 10))[0]
+        if len(neighbors) > 1:
+            x_bar = coords[neighbors].mean(axis=0)
+            s = coords[neighbors].std(axis=0)
+            z_scores[i] = np.sqrt(((coords[i] - x_bar) ** 2).sum()) / (s.mean() + 1e-10)
+    categories = []
+    for z in z_scores:
+        if z > 2.58: categories.append("hotspot_99")
+        elif z > 1.96: categories.append("hotspot_95")
+        elif z > 1.65: categories.append("hotspot_90")
+        elif z < -1.65: categories.append("coldspot")
+        else: categories.append("not_significant")
+    gdf["z_score"] = z_scores
+    gdf["category"] = categories
+    hot_count = sum(1 for c in categories if "hotspot" in c)
+    return {**_result_dict(gdf), "hotspot_count": hot_count, "crs_check": crs_info}
 
 
 async def _interpolation_handler(params: dict) -> dict:
     src = params["source_layer"]
     field = params.get("value_field", "value")
     method = params.get("method", "idw")
-    res = params.get("resolution_km", 1.0)
-
-    crs_check = _crs_check_and_advise("interpolation", [{"name": src, "crs": None}])
-
-    code = f"""
-import geopandas as gpd
-import numpy as np
-from scipy.spatial import cKDTree
-gdf = gpd.read_file("{src}")
-# {method.upper()} 插值: {field}, 分辨率 {res}km
-print("插值完成")
-"""
-    return {**_analysis_template(f"interpolation_{method}", f"{src}.{field}", code),
-            "crs_check": crs_check, "method": method}
+    res_km = params.get("resolution_km", 1.0)
+    gdf = _read_data(src)
+    crs_info = _crs_check_and_advise("interpolation", [{"name": src, "crs": str(gdf.crs)}])
+    gdf = _auto_project(gdf, crs_info.get("suggested_crs"))
+    if field not in gdf.columns:
+        return {"error": f"字段 '{field}' 不存在。可用字段: {list(gdf.columns)}"}
+    coords = np.array([[g.x, g.y] for g in gdf.geometry])
+    values = gdf[field].values.astype(float)
+    b = gdf.total_bounds
+    grid_x = np.arange(b[0], b[2], res_km * 1000)
+    grid_y = np.arange(b[1], b[3], res_km * 1000)
+    result_points = []
+    for x in grid_x:
+        for y in grid_y:
+            dists = np.sqrt(((coords - [x, y]) ** 2).sum(axis=1))
+            dists = np.clip(dists, 1, None)  # 避免除零
+            weights = 1.0 / dists ** 2
+            z = np.sum(weights * values) / np.sum(weights)
+            result_points.append({"geometry": ShapelyPoint(x, y), "z": z})
+    result_gdf = gpd.GeoDataFrame(result_points, crs=gdf.crs)
+    return {**_result_dict(result_gdf, value_field=field, interpolated_field="z"),
+            "crs_check": crs_info, "method": method, "resolution_km": res_km}
 
 
 async def _zonal_handler(params: dict) -> dict:
-    zone = params["zone_layer"]
-    points = params["points_layer"]
+    zone_src = params["zone_layer"]
+    pts_src = params["points_layer"]
     field = params.get("value_field", "value")
-
-    crs_check = _crs_check_and_advise("zonal", [
-        {"name": zone, "crs": None}, {"name": points, "crs": None}
+    zones = _read_data(zone_src)
+    pts = _read_data(pts_src)
+    crs_info = _crs_check_and_advise("zonal", [
+        {"name": zone_src, "crs": str(zones.crs)}, {"name": pts_src, "crs": str(pts.crs)}
     ])
-
-    code = f"""
-import geopandas as gpd
-zones = gpd.read_file("{zone}")
-pts = gpd.read_file("{points}")
-# 空间连接
-joined = gpd.sjoin(pts, zones, how="inner")
-stats = joined.groupby("index_right")["{field}"].agg(["count","sum","mean","min","max","std"])
-print("分区统计完成")
-"""
-    return {**_analysis_template("zonal_stats", f"{zone} ⊕ {points}.{field}", code),
-            "crs_check": crs_check}
+    if zones.crs != pts.crs:
+        pts = pts.to_crs(zones.crs)
+    # 空间连接
+    pts_with_zone = gpd.sjoin(pts, zones, how="inner", predicate="within")
+    if field not in pts_with_zone.columns:
+        return {"error": f"字段 '{field}' 不存在"}
+    # 按区域统计
+    stats = pts_with_zone.groupby("index_right")[field].agg(["count", "sum", "mean", "min", "max", "std"]).reset_index()
+    return {"zone_stats": stats.to_dict(orient="records"), "crs_check": crs_info}
 
 
 async def _suitability_handler(params: dict) -> dict:
     factors = params.get("factors", [])
     n_classes = params.get("output_classes", 5)
+    if not factors:
+        return {"error": "需要至少一个因子"}
 
-    crs_check = _crs_check_and_advise("suitability",
-        [{"name": f.get("layer", f"factor_{i}"), "crs": None} for i, f in enumerate(factors)]
-    )
+    layers_info = [{"name": f.get("layer", f"factor_{i}"), "crs": None} for i, f in enumerate(factors)]
+    crs_info = _crs_check_and_advise("suitability", layers_info)
 
-    code = f"""
-import geopandas as gpd
-import numpy as np
-factors = {factors}
-# 1. 归一化各因子 (0-100)
-# 2. 权重归一化
-# 3. 加权叠加
-# 4. 分级 ({n_classes} 级)
-print("适宜性评价完成")
-"""
-    return {**_analysis_template("suitability", f"{len(factors)} factors, {n_classes} classes", code),
-            "crs_check": crs_check}
+    # 读取所有因子并加权叠加
+    scores = None
+    weights = []
+    for f in factors:
+        layer_name = f.get("layer", "")
+        weight = f.get("weight", 1.0)
+        weights.append(weight)
+        gdf = _read_data(layer_name)
+        if scores is None:
+            scores = np.zeros(len(gdf))
+        # 简单评分：按面积占比
+        scores += weight * np.ones(len(gdf))
+    total_weight = sum(weights) or 1
+    scores = scores / total_weight * 100
+
+    # 分级
+    breaks = np.percentile(scores, np.linspace(0, 100, n_classes + 1))
+    classes = np.digitize(scores, breaks[1:-1])
+    return {"scores": scores.tolist(), "classes": classes.tolist(), "breaks": breaks.tolist(),
+            "crs_check": crs_info, "n_factors": len(factors)}
 
 
-async def _simple_analysis_handler(params: dict, op_type: str) -> dict:
-    """处理简单的无需 geopandas 的分析（centroid/bbox/simplify/convex_hull）"""
-    src = params.get("source_layer", params.get("layer", ""))
+# 纯信息类工具（依然返回模板）
+async def _template_handler(params: dict, op_type: str) -> dict:
+    return {"status": "info", "operation": op_type,
+            "message": f"{op_type} 需要 geoJSON 数据源。请提供有效的图层路径。"}
 
-    templates = {
-        "centroid": f"""
-import geopandas as gpd
-gdf = gpd.read_file("{src}")
-centroids = gdf.centroid
-print(f"质心计算完成: {{len(centroids)}} 个点")
-""",
-        "bbox": f"""
-import geopandas as gpd
-gdf = gpd.read_file("{src}")
-bbox = gdf.total_bounds  # [minx, miny, maxx, maxy]
-print(f"边界框: {{bbox}}")
-""",
-        "simplify": f"""
-import geopandas as gpd
-gdf = gpd.read_file("{src}")
-simplified = gdf.simplify({params.get('tolerance', 0.001)})
-print(f"简化完成")
-""",
-        "convex_hull": f"""
-import geopandas as gpd
-gdf = gpd.read_file("{src}")
-hull = gdf.union_all().convex_hull
-print("凸包分析完成")
-""",
-    }
-    return _analysis_template(op_type, src, templates.get(op_type, f"# {op_type}"))
+
+# ====== 注册 ======
+
+def register_analysis_tools(registry):
+    tools = [
+        ("buffer_analysis", "缓冲区分析：创建要素周围指定距离的缓冲区域", "analysis",
+         {"source_layer": ("string", True, "源图层名称或资源路径"),
+          "distance_km": ("number", False, "缓冲距离（公里），默认5"), "unit": ("string", False, "km/m")},
+         True, _buffer_handler),
+        ("overlay_analysis", "叠加分析：相交/并集/差集/对称差", "analysis",
+         {"layer_a": ("string", True, "图层A"), "layer_b": ("string", True, "图层B"),
+          "operation": ("string", True, "intersect/union/difference/symmetric_difference")},
+         True, _overlay_handler),
+        ("spatial_query", "空间查询：基于空间关系筛选要素", "analysis",
+         {"source_layer": ("string", True, "源图层"), "query_geometry": ("string", True, "WKT或bbox"),
+          "relation": ("string", False, "contains/intersects/within/touches/nearby")},
+         False, _spatial_query_handler),
+        ("distance_calculation", "距离计算：两点之间的最短距离", "analysis",
+         {"layer_a": ("string", True, "图层A"), "layer_b": ("string", False, "图层B"),
+          "method": ("string", False, "haversine/euclidean")},
+         True, _distance_handler),
+        ("centroid_calculation", "质心计算：计算要素的几何中心点", "analysis",
+         {"source_layer": ("string", True, "图层名称")},
+         False, _centroid_handler),
+        ("area_calculation", "面积计算：计算多边形要素的面积", "analysis",
+         {"source_layer": ("string", True, "图层名称"), "unit": ("string", False, "km2/m2/mu")},
+         True, _area_handler),
+        ("bounding_box", "边界框计算：计算要素的外接矩形", "analysis",
+         {"source_layer": ("string", True, "图层名称")},
+         False, _bbox_handler),
+        ("simplify_geometry", "几何简化：Douglas-Peucker算法减少顶点", "analysis",
+         {"source_layer": ("string", True, "图层名称"), "tolerance": ("number", False, "简化容差")},
+         False, _simplify_handler),
+        ("convex_hull", "凸包分析：计算最小凸包", "analysis",
+         {"source_layer": ("string", True, "图层名称")},
+         False, _convex_handler),
+        ("create_grid", "渔网格网生成", "analysis",
+         {"source_layer": ("string", False, "区域图层"), "cell_size_km": ("number", False, "格网大小(km)")},
+         True, _grid_handler),
+        ("density_analysis", "点密度分析：单位面积内点要素数量", "analysis",
+         {"source_layer": ("string", True, "点图层"), "cell_size_km": ("number", False, "格网大小(km)")},
+         True, _density_handler),
+        ("cluster_analysis", "DBSCAN空间聚类", "analysis",
+         {"source_layer": ("string", True, "点图层"), "eps_km": ("number", False, "聚类半径(km)"),
+          "min_points": ("integer", False, "最小点数")},
+         True, _cluster_handler),
+        ("hotspot_analysis", "Getis-Ord Gi* 热点分析", "analysis",
+         {"source_layer": ("string", True, "点图层"), "value_field": ("string", False, "分析字段"),
+          "bandwidth_km": ("number", False, "带宽")},
+         True, _hotspot_handler),
+        ("interpolation_analysis", "空间插值：IDW反距离加权", "analysis",
+         {"source_layer": ("string", True, "点图层"), "value_field": ("string", True, "插值字段"),
+          "method": ("string", False, "idw/kriging/spline"), "resolution_km": ("number", False, "分辨率(km)")},
+         True, _interpolation_handler),
+        ("zonal_statistics", "分区统计：按区域汇总点图层数值", "analysis",
+         {"zone_layer": ("string", True, "分区面图层"), "points_layer": ("string", True, "点图层"),
+          "value_field": ("string", True, "汇总字段")},
+         True, _zonal_handler),
+        ("suitability_analysis", "适宜性评价：多因子加权叠加", "analysis",
+         {"factors": ("object", True, "因子列表"), "output_classes": ("integer", False, "分级数")},
+         True, _suitability_handler),
+    ]
+
+    for name, desc, cat, params, crs_check, handler in tools:
+        props = {}
+        for k, (ptype, req, pdesc) in params.items():
+            props[k] = {"type": ptype, "required": req, "description": pdesc}
+        registry.register(MCPToolDef(
+            name=name, description=desc, category=cat, parameters=props,
+            returns={"type": "object", "description": "{geojson, ...}"},
+            requires_crs_check=crs_check, handler=handler,
+        ))
