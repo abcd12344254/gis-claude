@@ -6,10 +6,15 @@
 """
 
 import os
-import chromadb
 from pathlib import Path
 from typing import Optional
-from chromadb.config import Settings
+
+try:
+    import chromadb
+    from chromadb.config import Settings
+    _HAS_CHROMADB = True
+except ImportError:
+    _HAS_CHROMADB = False
 
 _COLLECTION_KNOWLEDGE = "gis_knowledge"
 _COLLECTION_DOCUMENTS = "gis_documents"

@@ -79,10 +79,14 @@ def _init_mcp_tools():
 def _init_rag_knowledge():
     """启动时自动将 Skills 文件导入 RAG 知识库"""
     try:
+        from rag.vector_store import _HAS_CHROMADB
+        if not _HAS_CHROMADB:
+            print("  [RAG] chromadb not installed, skipping")
+            return
         from rag.vector_store import get_collection, _COLLECTION_KNOWLEDGE
         col = get_collection(_COLLECTION_KNOWLEDGE)
         if col.count() > 0:
-            return  # 已经导入过，跳过
+            return
 
         skills_dir = Path(__file__).parent / "skills"
         for md_file in skills_dir.glob("*.md"):

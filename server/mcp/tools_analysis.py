@@ -9,13 +9,22 @@ import json
 from pathlib import Path
 from mcp.registry import MCPToolDef
 from agent.crs_checker import check_analysis_crs, format_crs_report
-import geopandas as gpd
-from shapely.geometry import box, shape, Point as ShapelyPoint
-from shapely import wkt
 import numpy as np
 
+try:
+    import geopandas as gpd
+    from shapely.geometry import box, shape, Point as ShapelyPoint
+    from shapely import wkt
+    _HAS_GEOPANDAS = True
+except ImportError:
+    _HAS_GEOPANDAS = False
 
-def _read_data(source: str) -> gpd.GeoDataFrame:
+
+def _need_geopandas():
+    """检查 geopandas 是否可用"""
+    return _HAS_GEOPANDAS
+
+def _read_data(source: str):
     """读取数据：支持文件路径（相对或绝对）"""
     src = Path(source)
     if not src.is_absolute():

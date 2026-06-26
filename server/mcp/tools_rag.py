@@ -8,12 +8,19 @@ ingest_document: 文档导入（未来批量导入用）
 """
 
 from mcp.registry import MCPToolDef
-from rag.vector_store import search_knowledge as _search_knowledge
-from rag.vector_store import search_documents as _search_documents
-from rag.vector_store import ingest_file, get_stats
+
+try:
+    from rag.vector_store import search_knowledge as _search_knowledge
+    from rag.vector_store import search_documents as _search_documents
+    from rag.vector_store import ingest_file, get_stats
+    _HAS_RAG = True
+except ImportError:
+    _HAS_RAG = False
 
 
 async def _handle_search_knowledge(params: dict) -> dict:
+    if not _HAS_RAG:
+        return {"results": [], "message": "RAG 未安装（chromadb 缺失）"}
     query = params.get("query", "")
     top_k = params.get("top_k", 5)
     knowledge_type = params.get("knowledge_type", "")
